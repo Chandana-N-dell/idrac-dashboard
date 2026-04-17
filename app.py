@@ -1325,18 +1325,64 @@ def _resolve_categories(comp_type_raw):
     return [comp_type_raw.strip()] if comp_type_raw else []
 
 
-def _parse_excel(file_stream, filename):
+def _infer_component_type_from_pn(assy_dpn, part_number, description):
+    """
+    Try to infer component type from part number patterns or description.
+    Returns a best-guess component type string or "Unknown".
+    """
+    # Combine all available text for analysis
+    text_to_analyze = f"{assy_dpn} {part_number} {description}".upper()
+
+    # Common Dell part number prefixes/patterns
+    patterns = {
+        "Processor": ["CPU", "PROC", "PROCESSOR", "XEON", "INTEL", "AMD"],
+        "Memory": ["DIMM", "MEMORY", "RAM", "DRAM", "DDR", "GBYTE"],
+        "Network Adapter": ["NIC", "NETWORK", "ETHERNET", "BCM", "QLOGIC", "MELLANOX"],
+        "Storage Drive": ["HDD", "SSD", "STORAGE", "DRIVE", "DISK", "NVME", "SATA", "SAS"],
+        "Storage Controller": ["PERC", "RAID", "HBA", "CONTROLLER", "BACKPLANE"],
+        "Power Supply": ["PSU", "POWER", "SUPPLY"],
+        "Fan": ["FAN", "COOLING"],
+        "System Board": ["MOTHERBOARD", "SYSTEM BOARD", "MAIN BOARD", "CHASSIS"],
+    }
+
+    # Check for matches in the text
+    for comp_type, keywords in patterns.items():
+        for keyword in keywords:
+            if keyword in text_to_analyze:
+                return comp_type
+
+    # If no pattern match, try to infer from description
+    if description:
+        desc_lower = description.lower()
+        if "processor" in desc_lower or "cpu" in desc_lower:
+            return "Processor"
+        elif "memory" in desc_lower or "ram" in desc_lower or "dimm" in desc_lower:
+            return "Memory"
+        elif "network" in desc_lower or "nic" in desc_lower or "ethernet" in desc_lower:
+            return "Network Adapter"
+        elif "drive" in desc_lower or "disk" in desc_lower or "storage" in desc_lower:
+            return "Storage Drive"
+        elif "power" in desc_lower or "supply" in desc_lower:
+            return "Power Supply"
+        elif "fan" in desc_lower:
+            return "Fan"
+
+    return "Unknown"
+
+
+def _parse_excel(file_stream, filename, sheet_name=None):
     """
     Parse an uploaded Excel file (.xlsx / .xls) – any filename is accepted.
 
     Logic:
-      1. Look for a worksheet named "lab build sheet" (case-insensitive).
-      2. If not found, scan every worksheet for a header row containing
+      1. If sheet_name is provided, use that sheet directly.
+      2. Otherwise, look for a worksheet named "lab build sheet" (case-insensitive).
+      3. If not found, scan every worksheet for a header row containing
          an "ASSY DPN" or "Part Number" column.  Use the first match.
-      3. If still nothing, try the active sheet as a last resort.
-      4. Optionally pick up companion columns in the same header row:
+      4. If still nothing, try the active sheet as a last resort.
+      5. Optionally pick up companion columns in the same header row:
          Component Type, Quantity, Slot, Description.
-      5. Parse all data rows below the header.
+      6. Parse all data rows below the header.
 
     Returns (rows_list, error_string).
     """
@@ -1368,7 +1414,13 @@ def _parse_excel(file_stream, filename):
     header_cells = None
     assy_col_idx = None
 
-    # --- Step 1: prefer a sheet named "lab build sheet" ---
+    # --- Step 1: if sheet_name is provided, use it directly ---
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        header_row_idx, header_cells, assy_col_idx = _scan_sheet_for_header(ws)
+        if assy_col_idx is None:
+            return None, f"Sheet '{sheet_name}' does not contain a valid header row with ASSY DPN or Part Number"
+    # --- Step 2: prefer a sheet named "lab build sheet" ---
     for name in wb.sheetnames:
         if "lab build sheet" in name.lower():
             ws = wb[name]
@@ -1529,7 +1581,7 @@ def compare_inventory(excel_rows, inventory):
         ex_pn_raw   = ex.get("part_number", "")
         ex_assy_norm = _normalize_pn(ex_assy_raw)
         ex_pn_norm   = _normalize_pn(ex_pn_raw)
-        ex_type      = ex["component_type"]
+        ex_type      = ex.get("component_type", "")
         ex_qty       = ex["quantity"]
 
         if not ex_assy_norm and not ex_pn_norm:
@@ -1589,6 +1641,9 @@ def compare_inventory(excel_rows, inventory):
             comp_label = "; ".join(pruned) if pruned else ex_type
         else:
             comp_label = ex_type
+            # If component type is empty for NOT_FOUND items, try to infer from part number or description
+            if not comp_label:
+                comp_label = _infer_component_type_from_pn(ex_assy_raw, ex_pn_raw, ex.get("description", ""))
 
         # Match status: only MATCHED or NOT_FOUND
         if not matched_inv:
@@ -1640,6 +1695,7 @@ def api_compare():
     Accept a multipart form with:
       - file: the Excel BOM file
       - inventory: JSON string of the current inventory array
+      - sheet_name: (optional) name of the sheet to use for comparison
     Returns comparison results.
     """
     if "file" not in request.files:
@@ -1665,9 +1721,12 @@ def api_compare():
     if not isinstance(inventory, list) or not inventory:
         return jsonify({"error": "Inventory is empty. Fetch inventory before comparing."}), 400
 
+    # Get optional sheet_name parameter
+    sheet_name = request.form.get("sheet_name")
+
     # Parse Excel in memory
     file_bytes = io.BytesIO(f.read())
-    excel_rows, parse_err = _parse_excel(file_bytes, f.filename)
+    excel_rows, parse_err = _parse_excel(file_bytes, f.filename, sheet_name=sheet_name)
     if parse_err:
         return jsonify({"error": parse_err}), 400
 
@@ -2065,6 +2124,36 @@ def fetch_fan_details():
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch fan details: {str(e)}"}), 500
+
+
+@app.route("/api/get-excel-sheets", methods=["POST"])
+def get_excel_sheets():
+    """Get list of sheet names from uploaded Excel file."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
+        if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xls")):
+            return jsonify({"error": "File must be .xlsx or .xls"}), 400
+
+        try:
+            wb = load_workbook(file, read_only=True, data_only=True)
+            sheet_names = wb.sheetnames
+            wb.close()
+
+            return jsonify({
+                "sheets": sheet_names,
+                "default_sheet": None
+            })
+        except Exception as e:
+            return jsonify({"error": f"Cannot read Excel file: {str(e)}"}), 400
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to get sheets: {str(e)}"}), 500
 
 
 @app.route("/api/download-template")
