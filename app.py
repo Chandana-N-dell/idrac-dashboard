@@ -84,6 +84,45 @@ def _safe(d, *keys, default="N/A"):
     return cur if cur not in (None, "", 0) else default
 
 
+def _simplify_fan_name(fan_name):
+    """Simplify complex fan names like FAN1A_1 to Fan1A format, preserving A/B designations."""
+    if not fan_name or fan_name == "N/A":
+        return fan_name
+    
+    import re
+    
+    # Pattern to extract fan number and letter from names like FAN1A_1, FAN1B_1, Fan1A, etc.
+    patterns = [
+        r'FAN(\d+)([AB])_?\d*',  # FAN1A_1, FAN1B_1, FAN1A, FAN1B
+        r'FAN(\d+)([AB])',        # FAN1A, FAN2B
+        r'FAN\s*(\d+)\s*([AB])',  # Fan 1A, Fan 2B
+        r'(\d+)([AB])_?\d*',       # 1A_1, 1B_1, 1A, 1B
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, fan_name.upper())
+        if match:
+            fan_num = match.group(1)
+            fan_letter = match.group(2)
+            return f"Fan{fan_num}{fan_letter}"
+    
+    # Fallback for simple fan numbers without letters
+    simple_patterns = [
+        r'FAN(\d+)',           # FAN1, FAN2
+        r'FAN\s*(\d+)',        # Fan 1, Fan 2
+        r'(\d+)',              # 1, 2
+    ]
+    
+    for pattern in simple_patterns:
+        match = re.search(pattern, fan_name.upper())
+        if match:
+            fan_num = match.group(1)
+            return f"Fan{fan_num}"
+    
+    # Fallback: return original name but cleaned up
+    return fan_name.replace('_', ' ').title()
+
+
 # ---------------------------------------------------------------------------
 # Inventory parsers  – each returns a list of normalised row dicts
 # ---------------------------------------------------------------------------
@@ -485,6 +524,7 @@ def _parse_power(chassis_data, base_url, auth):
 def _parse_thermal(base_url, auth, system_model=""):
     """Fetch fans from Chassis Thermal endpoint."""
     rows = []
+    seen_fan_names = set()  # Track unique fan names to prevent duplicates
     
     # Try multiple thermal endpoint paths
     thermal_paths = [
@@ -562,57 +602,112 @@ def _parse_thermal(base_url, auth, system_model=""):
         elif "Health" in fan:
             fan_status = _safe(fan, "Health")
         
-        # Extract fan speed/RPM
+                
+        # Extract fan speed/PWM (actual PWM percentage, not RPM)
+        # Look for percentage values first (like 25% from the iDRAC interface)
+        reading_pwm = _safe(fan, "SpeedPercent")  # Most likely field for percentage
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "FanSpeedPercent")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "PWM")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "DutyCyclePercent")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "DutyCycle")
+        
+        # Try other PWM field variations
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "ReadingPWM", default=_safe(fan, "SpeedPWM", default=_safe(fan, "FanPWM")))
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "CurrentPWM", default=_safe(fan, "ActualPWM", default=_safe(fan, "SetPWM")))
+        
+        # Check OEM fields (Dell specific)
+        if reading_pwm == "N/A" or reading_pwm == "":
+            oem_data = fan.get("Oem", {})
+            if isinstance(oem_data, dict):
+                dell_oem = oem_data.get("Dell", {})
+                if isinstance(dell_oem, dict):
+                    reading_pwm = _safe(dell_oem, "SpeedPercent", default=_safe(dell_oem, "DutyCycle", default=_safe(dell_oem, "FanPWM")))
+        
+        # If PWM value contains % symbol, extract just the number
+        if reading_pwm != "N/A" and isinstance(reading_pwm, str):
+            if '%' in reading_pwm:
+                # Extract number before % (e.g., "25%" -> "25")
+                import re
+                pwm_match = re.search(r'(\d+)%?', reading_pwm)
+                if pwm_match:
+                    reading_pwm = pwm_match.group(1)
+        
+        # Final fallback: if we have RPM but no PWM, we could calculate approximate PWM
+        # but it's better to return N/A than show incorrect data
+        if reading_pwm == "N/A" or reading_pwm == "":
+            # Don't use RPM data as PWM - keep it as N/A to avoid confusion
+            reading_pwm = "N/A"
+        
+        # Extract fan name with better fallbacks and simplify it
+        raw_fan_name = _safe(fan, "Name", default=_safe(fan, "FanName", default=_safe(fan, "MemberId")))
+        if not raw_fan_name or raw_fan_name == "N/A":
+            raw_fan_name = f"Fan {_safe(fan, 'MemberId', default='Unknown')}"
+        fan_name = _simplify_fan_name(raw_fan_name)
+        
+                
+        # Extract RPM data separately for reference
         reading_rpm = _safe(fan, "Reading")
         if reading_rpm == "N/A" or reading_rpm == "":
-            # Try alternative RPM fields
             reading_rpm = _safe(fan, "SpeedRPM", default=_safe(fan, "CurrentSpeed", default=_safe(fan, "Speed")))
         
-        # Extract fan name with better fallbacks
-        fan_name = _safe(fan, "Name", default=_safe(fan, "FanName", default=_safe(fan, "MemberId")))
-        if not fan_name or fan_name == "N/A":
-            fan_name = f"Fan {_safe(fan, 'MemberId', default='Unknown')}"
-        
-        rows.append({
-            "category":    "Fan",
-            "type":        "Cooling Fan",
-            "name":        fan_name,
-            "slot":        _safe(fan, "MemberId", default=_safe(fan, "PhysicalContext", default=fan_name)),
-            "quantity":    1,
-            "serial":      _safe(fan, "SerialNumber"),
-            "part_number": _safe(fan, "PartNumber"),
-            "firmware":    "N/A",
-            "status":      fan_status,
-            "extra": {
-                "ReadingRPM":     reading_rpm,
-                "ReadingUnits":   _safe(fan, "ReadingUnits", default="RPM"),
-                "PhysicalContext": _safe(fan, "PhysicalContext"),
-                "Description":    _safe(fan, "Description"),
-                "FanTier":        fan_tier,
-                "ThermalPath":    thermal_path_used,
-                "HotPluggable":   _safe(fan, "HotPluggable"),
-                "Redundancy":     _safe(fan, "Redundancy"),
-            }
-        })
+        # Check if this fan name already exists to prevent duplicates
+        if fan_name not in seen_fan_names:
+            seen_fan_names.add(fan_name)
+            rows.append({
+                "category":    "Fan",
+                "type":        "Cooling Fan",
+                "name":        fan_name,
+                "slot":        _safe(fan, "MemberId", default=_safe(fan, "PhysicalContext", default=fan_name)),
+                "quantity":    1,
+                "serial":      _safe(fan, "SerialNumber"),
+                "part_number": _safe(fan, "PartNumber"),
+                "firmware":    "N/A",
+                "status":      fan_status,
+                "extra": {
+                    "ReadingPWM":     reading_pwm,
+                    "ReadingRPM":     reading_rpm,
+                    "ReadingUnits":   _safe(fan, "ReadingUnits", default="PWM"),
+                    "PhysicalContext": _safe(fan, "PhysicalContext"),
+                    "Description":    _safe(fan, "Description"),
+                    "FanTier":        fan_tier,
+                    "ThermalPath":    thermal_path_used,
+                    "HotPluggable":   _safe(fan, "HotPluggable"),
+                    "Redundancy":     _safe(fan, "Redundancy"),
+                }
+            })
     
-    # Add debug info if no fans found
-    if not rows:
+    # Add debug info if no fans found OR if PWM data is missing
+    if not rows or all(r.get("extra", {}).get("ReadingPWM") == "N/A" for r in rows if r.get("category") == "Fan"):
         # Add a debug entry to help troubleshoot
+        debug_info = {
+            "AvailableKeys": list(thermal.keys()) if isinstance(thermal, dict) else "Non-dict response",
+            "ThermalPath": thermal_path_used,
+            "FanTier": fan_tier,
+        }
+        
+        # If we have fan data but no PWM, show sample fan structure
+        if thermal and isinstance(thermal, dict) and "Fans" in thermal and thermal["Fans"]:
+            sample_fan = thermal["Fans"][0]
+            debug_info["SampleFanFields"] = list(sample_fan.keys()) if isinstance(sample_fan, dict) else "Non-dict fan data"
+            debug_info["SampleFanData"] = {k: v for k, v in sample_fan.items() if isinstance(v, (str, int, float))} if isinstance(sample_fan, dict) else "Invalid fan data"
+        
         rows.append({
             "category":    "Fan",
             "type":        "Debug Info",
-            "name":        "No Fan Data Found",
+            "name":        "PWM Data Not Available" if rows else "No Fan Data Found",
             "slot":        f"Endpoint: {thermal_path_used or 'None'}",
             "quantity":    0,
             "serial":      "N/A",
             "part_number": "N/A",
             "firmware":    "N/A",
             "status":      "Warning",
-            "extra": {
-                "AvailableKeys": list(thermal.keys()) if isinstance(thermal, dict) else "Non-dict response",
-                "ThermalPath": thermal_path_used,
-                "FanTier": fan_tier,
-            }
+            "extra": debug_info
         })
     
     return rows
@@ -1623,9 +1718,53 @@ def fetch_lc_logs():
         host = data.get("host")
         username = data.get("username")
         password = data.get("password")
+        use_mock = data.get("use_mock", False)
 
-        if not all([host, username, password]):
+        if not all([host, username, password]) and not use_mock:
             return jsonify({"error": "Missing credentials"}), 400
+
+        # Return mock data for testing when requested
+        if use_mock:
+            mock_logs = [
+                {
+                    "created": "2026-04-17T10:30:00+00:00",
+                    "severity": "Information",
+                    "message": "System boot completed successfully",
+                    "source": "System"
+                },
+                {
+                    "created": "2026-04-17T09:15:00+00:00", 
+                    "severity": "Warning",
+                    "message": "Fan speed sensor reading out of range",
+                    "source": "Thermal"
+                },
+                {
+                    "created": "2026-04-17T08:45:00+00:00",
+                    "severity": "Critical", 
+                    "message": "Power supply unit 2 failure detected",
+                    "source": "Power"
+                },
+                {
+                    "created": "2026-04-17T07:20:00+00:00",
+                    "severity": "Information",
+                    "message": "Firmware update completed",
+                    "source": "iDRAC"
+                },
+                {
+                    "created": "2026-04-17T06:10:00+00:00",
+                    "severity": "Warning",
+                    "message": "Memory module 1 temperature high",
+                    "source": "Memory"
+                }
+            ]
+            return jsonify({
+                "logs": mock_logs,
+                "debug_info": {
+                    "endpoint_used": "mock_data",
+                    "total_logs_found": len(mock_logs),
+                    "response_structure": "mock_data"
+                }
+            })
 
         auth = (username, password)
         base_url = f"https://{host}"
@@ -1888,7 +2027,7 @@ def compare_inventory_interfaces():
 
 @app.route("/api/fans", methods=["POST"])
 def fetch_fan_details():
-    """Fetch fan details from iDRAC web UI Hardware Inventory page."""
+    """Fetch fan details from iDRAC thermal endpoint."""
     try:
         data = request.get_json()
         host = data.get("host")
@@ -1898,115 +2037,31 @@ def fetch_fan_details():
         if not all([host, username, password]):
             return jsonify({"error": "Missing credentials"}), 400
 
-        import requests
-        try:
-            from bs4 import BeautifulSoup
-        except ImportError:
-            return jsonify({"error": "beautifulsoup4 library not installed. Run: pip install beautifulsoup4"}), 500
+        base_url = f"https://{host}"
+        auth = (username, password)
 
-        # Create session for web UI login
-        session = requests.Session()
-        session.verify = False  # Ignore SSL warnings for iDRAC
-        requests.packages.urllib3.disable_warnings()
+        # Get system model for fan tier determination
+        system_data = _rf_get(base_url, "/redfish/v1/Systems/System.Embedded.1", auth, timeout=15)
+        system_model = system_data.get("Model", "") if system_data else ""
 
-        # Login to iDRAC web UI
-        login_url = f"https://{host}/index.html"
-        login_data = {
-            "user": username,
-            "password": password
-        }
-
-        try:
-            response = session.post(login_url, data=login_data, timeout=30, allow_redirects=True)
-            if response.status_code != 200:
-                return jsonify({"error": "Failed to login to iDRAC web UI"}), 401
-        except Exception as e:
-            return jsonify({"error": f"Login failed: {str(e)}"}), 401
-
-        # Navigate to Hardware Inventory page
-        # The URL pattern for hardware inventory is typically /sysinv.html or similar
-        inventory_url = f"https://{host}/sysinv.html"
-        try:
-            response = session.get(inventory_url, timeout=30)
-            if response.status_code != 200:
-                # Try alternative URL patterns
-                for alt_url in [f"https://{host}/cgi-bin/webcgi/sysinv", f"https://{host}/sysinv"]:
-                    try:
-                        response = session.get(alt_url, timeout=30)
-                        if response.status_code == 200:
-                            inventory_url = alt_url
-                            break
-                    except:
-                        continue
-                else:
-                    return jsonify({"error": "Failed to access Hardware Inventory page"}), 404
-        except Exception as e:
-            return jsonify({"error": f"Failed to access inventory page: {str(e)}"}), 404
-
-        # Parse HTML to extract fan descriptions
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Use the existing _parse_thermal function to get fan data
+        fan_rows = _parse_thermal(base_url, auth, system_model)
+        
+        # Convert fan data to the format expected by the frontend
         fans_data = []
+        for fan_row in fan_rows:
+            if fan_row.get("category") == "Fan" and fan_row.get("type") != "Debug Info":
+                fans_data.append({
+                    "description": fan_row.get("name", "Unknown Fan"),
+                    "speed": fan_row.get("extra", {}).get("ReadingPWM", "N/A"),
+                    "tier": fan_row.get("extra", {}).get("FanTier", "Unknown"),
+                    "status": fan_row.get("status", "Unknown"),
+                    "slot": fan_row.get("slot", "Unknown"),
+                    "part_number": fan_row.get("part_number", "N/A"),
+                    "serial": fan_row.get("serial", "N/A")
+                })
 
-        # Look for fan-related table rows or data
-        # This depends on the specific HTML structure of iDRAC web UI
-        # Common patterns: tables with "Fan" in headers, or specific data attributes
-
-        # Try to find table with fan information
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) >= 2:
-                    text_content = ' '.join(cell.get_text(strip=True) for cell in cells)
-                    # Look for rows containing fan information
-                    if 'fan' in text_content.lower():
-                        # Extract device description (second column typically)
-                        if len(cells) >= 2:
-                            description = cells[1].get_text(strip=True)
-                            if description and description.lower() != 'fan':
-                                fans_data.append({
-                                    "description": description,
-                                    "speed": "N/A",  # Speed might not be in inventory page
-                                    "tier": "Unknown"
-                                })
-
-        # If no fans found in tables, try looking for specific data elements
-        if not fans_data:
-            # Look for divs or spans with fan data
-            fan_elements = soup.find_all(text=lambda x: x and 'fan' in x.lower())
-            for elem in fan_elements:
-                parent = elem.parent
-                if parent:
-                    description = parent.get_text(strip=True)
-                    if description and len(description) > 3 and description.lower() != 'fan':
-                        if not any(f["description"] == description for f in fans_data):
-                            fans_data.append({
-                                "description": description,
-                                "speed": "N/A",
-                                "tier": "Unknown"
-                            })
-
-        # Determine fan tier from system model using Redfish (since web UI might not have it)
-        try:
-            system_data = _rf_get(f"https://{host}", "/redfish/v1/Systems/System.Embedded.1", (username, password), timeout=30)
-            system_model = system_data.get("Model", "") if system_data else ""
-
-            fan_tier = "Silver"
-            if system_model:
-                model_upper = system_model.upper()
-                if any(x in model_upper for x in ["R750", "R760", "R7515", "R7615", "R840", "R850", "R960", "R960XA"]):
-                    fan_tier = "Platinum"
-                elif any(x in model_upper for x in ["R640", "R650", "R6515", "R6525", "R740", "R7415", "R7425"]):
-                    fan_tier = "Gold"
-
-            # Update tier for all fans
-            for fan in fans_data:
-                fan["tier"] = fan_tier
-        except:
-            pass  # If Redfish fails, keep Unknown tier
-
-        return jsonify({"fans": fans_data, "system_model": system_model if 'system_model' in locals() else ""})
+        return jsonify({"fans": fans_data, "system_model": system_model})
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch fan details: {str(e)}"}), 500

@@ -239,18 +239,37 @@
                 : "";
             const nameWithTier = fanTier ? `${fanTier} ${esc(r.name)}` : esc(r.name);
 
-            // Add fan RPM information for Fan category
+            // Add fan PWM and RPM information for Fan category
             let fanInfo = "";
             if (r.category === "Fan" && r.extra) {
+                const pwm = r.extra.ReadingPWM;
                 const rpm = r.extra.ReadingRPM;
-                if (rpm && rpm !== "N/A" && r.type !== "Debug Info") {
-                    fanInfo = `<br><small class="fan-rpm">${rpm} ${r.extra.ReadingUnits || "RPM"}</small>`;
+                
+                if (r.type !== "Debug Info") {
+                    // Show PWM if available
+                    if (pwm && pwm !== "N/A") {
+                        fanInfo = `<br><small class="fan-pwm">${pwm} ${r.extra.ReadingUnits || "PWM"}</small>`;
+                    }
+                    // Show RPM if available and different from PWM
+                    if (rpm && rpm !== "N/A" && rpm !== pwm) {
+                        fanInfo += `<br><small class="fan-rpm">${rpm} RPM</small>`;
+                    }
                 }
+                
                 // Show debug info for debug entries
-                if (r.type === "Debug Info" && r.extra.ThermalPath) {
-                    fanInfo = `<br><small class="debug-info">Path: ${r.extra.ThermalPath}</small>`;
+                if (r.type === "Debug Info") {
+                    if (r.extra.ThermalPath) {
+                        fanInfo = `<br><small class="debug-info">Path: ${r.extra.ThermalPath}</small>`;
+                    }
                     if (r.extra.AvailableKeys) {
                         fanInfo += `<br><small class="debug-info">Keys: ${r.extra.AvailableKeys.join(", ")}</small>`;
+                    }
+                    if (r.extra.SampleFanFields) {
+                        fanInfo += `<br><small class="debug-info">Fan Fields: ${r.extra.SampleFanFields.join(", ")}</small>`;
+                    }
+                    if (r.extra.SampleFanData) {
+                        const sampleData = Object.entries(r.extra.SampleFanData).map(([k, v]) => `${k}=${v}`).join(", ");
+                        fanInfo += `<br><small class="debug-info">Sample: ${sampleData}</small>`;
                     }
                 }
             }
@@ -846,14 +865,23 @@
         show(btnSpinner);
 
         try {
+            const useMockData = document.getElementById("use-mock-data").checked;
+            
+            const requestBody = {
+                use_mock: useMockData
+            };
+            
+            // Only include credentials if not using mock data
+            if (!useMockData) {
+                requestBody.host = document.getElementById("host").value.trim();
+                requestBody.username = document.getElementById("username").value.trim();
+                requestBody.password = document.getElementById("password").value;
+            }
+            
             const resp = await fetch("/api/lc-logs", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    host: document.getElementById("host").value.trim(),
-                    username: document.getElementById("username").value.trim(),
-                    password: document.getElementById("password").value,
-                }),
+                body: JSON.stringify(requestBody),
             });
 
             if (!resp.ok) {
@@ -1111,12 +1139,12 @@
         }
 
         fanBody.innerHTML = fans.map((fan, index) => {
-            const rpm = fan.speed || "N/A";
+            const pwm = fan.speed || "N/A";
             const description = fan.description || fan.name || `Fan ${index}`;
             return `
             <tr>
                 <td>${esc(description)}</td>
-                <td>${rpm} RPM</td>
+                <td>${pwm} PWM</td>
             </tr>
         `}).join("");
     }
