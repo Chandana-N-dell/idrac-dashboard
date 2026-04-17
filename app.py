@@ -1134,6 +1134,51 @@ def _resolve_categories(comp_type_raw):
     return [comp_type_raw.strip()] if comp_type_raw else []
 
 
+def _infer_component_type_from_pn(assy_dpn, part_number, description):
+    """
+    Try to infer component type from part number patterns or description.
+    Returns a best-guess component type string or "Unknown".
+    """
+    # Combine all available text for analysis
+    text_to_analyze = f"{assy_dpn} {part_number} {description}".upper()
+
+    # Common Dell part number prefixes/patterns
+    patterns = {
+        "Processor": ["CPU", "PROC", "PROCESSOR", "XEON", "INTEL", "AMD"],
+        "Memory": ["DIMM", "MEMORY", "RAM", "DRAM", "DDR", "GBYTE"],
+        "Network Adapter": ["NIC", "NETWORK", "ETHERNET", "BCM", "QLOGIC", "MELLANOX"],
+        "Storage Drive": ["HDD", "SSD", "STORAGE", "DRIVE", "DISK", "NVME", "SATA", "SAS"],
+        "Storage Controller": ["PERC", "RAID", "HBA", "CONTROLLER", "BACKPLANE"],
+        "Power Supply": ["PSU", "POWER", "SUPPLY"],
+        "Fan": ["FAN", "COOLING"],
+        "System Board": ["MOTHERBOARD", "SYSTEM BOARD", "MAIN BOARD", "CHASSIS"],
+    }
+
+    # Check for matches in the text
+    for comp_type, keywords in patterns.items():
+        for keyword in keywords:
+            if keyword in text_to_analyze:
+                return comp_type
+
+    # If no pattern match, try to infer from description
+    if description:
+        desc_lower = description.lower()
+        if "processor" in desc_lower or "cpu" in desc_lower:
+            return "Processor"
+        elif "memory" in desc_lower or "ram" in desc_lower or "dimm" in desc_lower:
+            return "Memory"
+        elif "network" in desc_lower or "nic" in desc_lower or "ethernet" in desc_lower:
+            return "Network Adapter"
+        elif "drive" in desc_lower or "disk" in desc_lower or "storage" in desc_lower:
+            return "Storage Drive"
+        elif "power" in desc_lower or "supply" in desc_lower:
+            return "Power Supply"
+        elif "fan" in desc_lower:
+            return "Fan"
+
+    return "Unknown"
+
+
 def _parse_excel(file_stream, filename, sheet_name=None):
     """
     Parse an uploaded Excel file (.xlsx / .xls) – any filename is accepted.
@@ -1345,7 +1390,7 @@ def compare_inventory(excel_rows, inventory):
         ex_pn_raw   = ex.get("part_number", "")
         ex_assy_norm = _normalize_pn(ex_assy_raw)
         ex_pn_norm   = _normalize_pn(ex_pn_raw)
-        ex_type      = ex["component_type"]
+        ex_type      = ex.get("component_type", "")
         ex_qty       = ex["quantity"]
 
         if not ex_assy_norm and not ex_pn_norm:
@@ -1405,6 +1450,9 @@ def compare_inventory(excel_rows, inventory):
             comp_label = "; ".join(pruned) if pruned else ex_type
         else:
             comp_label = ex_type
+            # If component type is empty for NOT_FOUND items, try to infer from part number or description
+            if not comp_label:
+                comp_label = _infer_component_type_from_pn(ex_assy_raw, ex_pn_raw, ex.get("description", ""))
 
         # Match status: only MATCHED or NOT_FOUND
         if not matched_inv:
