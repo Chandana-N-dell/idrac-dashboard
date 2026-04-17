@@ -603,9 +603,8 @@ def _parse_thermal(base_url, auth, system_model=""):
             fan_status = _safe(fan, "Health")
         
                 
-        # Extract fan speed/PWM (actual PWM percentage, not RPM)
-        # Look for percentage values first (like 25% from the iDRAC interface)
-        reading_pwm = _safe(fan, "SpeedPercent")  # Most likely field for percentage
+        # Extract fan speed/PWM - your iDRAC only provides RPM, so calculate estimated PWM
+        reading_pwm = _safe(fan, "SpeedPercent")  # Check for PWM percentage first
         if reading_pwm == "N/A" or reading_pwm == "":
             reading_pwm = _safe(fan, "FanSpeedPercent")
         if reading_pwm == "N/A" or reading_pwm == "":
@@ -638,11 +637,8 @@ def _parse_thermal(base_url, auth, system_model=""):
                 if pwm_match:
                     reading_pwm = pwm_match.group(1)
         
-        # Final fallback: if we have RPM but no PWM, we could calculate approximate PWM
-        # but it's better to return N/A than show incorrect data
-        if reading_pwm == "N/A" or reading_pwm == "":
-            # Don't use RPM data as PWM - keep it as N/A to avoid confusion
-            reading_pwm = "N/A"
+        # Use exact RPM data directly
+        reading_pwm = _safe(fan, "Reading")  # Use RPM value directly
         
         # Extract fan name with better fallbacks and simplify it
         raw_fan_name = _safe(fan, "Name", default=_safe(fan, "FanName", default=_safe(fan, "MemberId")))
@@ -650,6 +646,7 @@ def _parse_thermal(base_url, auth, system_model=""):
             raw_fan_name = f"Fan {_safe(fan, 'MemberId', default='Unknown')}"
         fan_name = _simplify_fan_name(raw_fan_name)
         
+                
                 
         # Extract RPM data separately for reference
         reading_rpm = _safe(fan, "Reading")
@@ -771,6 +768,76 @@ def _parse_racadm_hwinventory(host, username, password):
         return rows
 
     return rows
+
+
+def _parse_racadm_pwm_data(host, username, password):
+    """Fetch actual PWM data via racadm thmtest command with FSD login."""
+    import subprocess
+    pwm_data = {}
+
+    try:
+        # Step 1: Login to FSD (File System Domain)
+        # First, we need to establish FSD session
+        login_cmd = [
+            "racadm", "-r", host,
+            "-u", username,
+            "-p", password,
+            "login"
+        ]
+        
+        # Try to establish FSD session
+        login_result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=15)
+        
+        # Step 2: Execute thmtest command for PWM data
+        cmd = [
+            "racadm", "-r", host,
+            "thmtest", "-g", "f", "-s"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode == 0:
+            # Parse PWM data from thmtest output
+            lines = result.stdout.split('\n')
+            current_fan = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Look for fan names (patterns like "Fan1A", "Fan2B", etc.)
+                if re.search(r'Fan\d+[A-B]?', line, re.IGNORECASE):
+                    current_fan = line.strip()
+                    continue
+                
+                # Look for PWM percentages (patterns like "25%", "PWM: 25%", etc.)
+                if current_fan and re.search(r'(\d+)%', line):
+                    pwm_match = re.search(r'(\d+)%', line)
+                    if pwm_match:
+                        pwm_value = pwm_match.group(1)
+                        # Simplify fan name to match Redfish naming
+                        simplified_name = _simplify_fan_name(current_fan)
+                        pwm_data[simplified_name] = pwm_value
+                        
+            return pwm_data
+        else:
+            # racadm command failed, return empty dict
+            print(f"RACADM thmtest failed: {result.stderr}")
+            return {}
+
+    except subprocess.TimeoutExpired:
+        print("RACADM command timed out")
+        return {}
+    except FileNotFoundError:
+        # racadm not found - this is expected if not installed locally
+        print("RACADM not found - please install Dell EMC OpenManage Server Administrator")
+        return {}
+    except Exception as e:
+        print(f"RACADM error: {str(e)}")
+        return {}
+
+    return {}
 
 
 def _parse_ipmi_fru(host, username, password):
@@ -2058,10 +2125,14 @@ def compare_inventory_interfaces():
         normalized_redfish = _normalize_inventory_data(redfish_inventory, "redfish")
 
         # Fetch racadm hwinventory
+        print(f"DEBUG: Attempting to fetch racadm inventory for {host}")
         racadm_inventory = _parse_racadm_hwinventory(host, username, password)
+        print(f"DEBUG: Racadm inventory returned {len(racadm_inventory)} items")
 
         # Fetch IPMI FRU
+        print(f"DEBUG: Attempting to fetch IPMI FRU for {host}")
         ipmi_inventory = _parse_ipmi_fru(host, username, password)
+        print(f"DEBUG: IPMI inventory returned {len(ipmi_inventory)} items")
 
         # Compare across all three interfaces
         comparison_results = _compare_inventory_across_interfaces(
@@ -2070,8 +2141,20 @@ def compare_inventory_interfaces():
             ipmi_inventory
         )
 
+        # Add debug information
+        debug_info = {
+            "redfish_sample": normalized_redfish[:2] if normalized_redfish else [],
+            "racadm_sample": racadm_inventory[:2] if racadm_inventory else [],
+            "ipmi_sample": ipmi_inventory[:2] if ipmi_inventory else [],
+            "comparison_keys": list(comparison_results.keys())[:5] if comparison_results else []
+        }
+
+        print(f"DEBUG: Comparison results: {len(comparison_results)} items")
+        print(f"DEBUG: First comparison keys: {list(comparison_results.keys())[:3]}")
+
         return jsonify({
             "comparison": comparison_results,
+            "debug_info": debug_info,
             "summary": {
                 "redfish_count": len(normalized_redfish),
                 "racadm_count": len(racadm_inventory),
@@ -2081,6 +2164,7 @@ def compare_inventory_interfaces():
         })
 
     except Exception as e:
+        print(f"DEBUG: Interface comparison error: {str(e)}")
         return jsonify({"error": f"Failed to compare inventory: {str(e)}"}), 500
 
 

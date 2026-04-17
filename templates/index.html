@@ -130,8 +130,8 @@
                         <table class="system-info-table" id="fan-info-table">
                             <thead>
                                 <tr>
-                                    <th>Fan</th>
-                                    <th>Speed (PWM)</th>
+                                    <th> Fan</th>
+                                    <th>Speed (RPM)</th>
                                 </tr>
                             </thead>
                             <tbody id="fan-body"></tbody>
@@ -152,6 +152,17 @@
                                 <div class="health-status-value" id="health-status-value">Connecting...</div>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Refresh Dashboard Button -->
+                    <div class="refresh-dashboard-card">
+                        <button id="btn-refresh-dashboard" class="btn btn-primary">
+                            <span class="btn-text">Refresh Dashboard</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Refreshing&hellip;
+                            </span>
+                        </button>
                     </div>
                 </div>
 

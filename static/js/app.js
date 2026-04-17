@@ -29,6 +29,7 @@
     const btnToggleGroup   = document.getElementById("btn-toggle-group");
     const btnExportCsv     = document.getElementById("btn-export-csv");
     const btnDisconnect    = document.getElementById("btn-disconnect");
+    const btnRefreshDashboard = document.getElementById("btn-refresh-dashboard");
     const warningsBox      = document.getElementById("warnings-box");
     const pageInterfaceComparison = document.getElementById("page-interface-comparison");
     const btnRunInterfaceComparison = document.getElementById("btn-run-interface-comparison");
@@ -232,7 +233,7 @@
             inventoryBody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted);">No matching components found.</td></tr>';
             return;
         }
-        inventoryBody.innerHTML = rows.map(r => {
+        inventoryBody.innerHTML = rows.filter(r => r.type !== "Debug Info").map(r => {
             // Add fan tier badge for Fan category
             const fanTier = r.category === "Fan" && r.extra && r.extra.FanTier
                 ? `<span class="fan-tier-badge tier-${r.extra.FanTier.toLowerCase()}">${esc(r.extra.FanTier)}</span>`
@@ -288,10 +289,10 @@
         }).join("");
     }
 
-    // ── Render Grouped View ───────────────────────────────────────────
+    // Render grouped view
     function renderGrouped(rows) {
         const groups = {};
-        rows.forEach(r => {
+        rows.filter(r => r.type !== "Debug Info").forEach(r => {
             if (!groups[r.category]) groups[r.category] = [];
             groups[r.category].push(r);
         });
@@ -483,6 +484,70 @@
         btnToggleGroup.classList.add("btn-outline");
         btnCmpGroup.classList.remove("btn-primary");
         btnCmpGroup.classList.add("btn-outline");
+    });
+
+    // Refresh Dashboard functionality
+    btnRefreshDashboard.addEventListener("click", async () => {
+        const btnText = btnRefreshDashboard.querySelector(".btn-text");
+        const btnSpinner = btnRefreshDashboard.querySelector(".btn-spinner");
+
+        // Disable button and show loading
+        btnRefreshDashboard.disabled = true;
+        hide(btnText);
+        show(btnSpinner);
+
+        try {
+            // Show loading overlay and restart data collection
+            hide(dashboardSection);
+            show(loadingSection);
+            loadingStatus.textContent = "Refreshing inventory data from iDRAC...";
+            connBadge.className = "badge badge-idle";
+            connBadge.textContent = "Refreshing...";
+
+            // Re-fetch inventory data
+            const host = document.getElementById("host").value.trim();
+            const username = document.getElementById("username").value.trim();
+            const password = document.getElementById("password").value;
+
+            const resp = await fetch("/api/inventory", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ host, username, password }),
+            });
+
+            const data = await resp.json();
+
+            if (!resp.ok) {
+                throw { status: resp.status, message: data.error || "Unknown error", code: data.code };
+            }
+
+            inventoryData = data.inventory || [];
+            renderDashboard(data);
+
+            // Auto-fetch health status after successful refresh
+            fetchHealthMetrics(true);
+            fetchFanDetailsFromComponentInventory();
+
+        } catch (err) {
+            console.error("Refresh failed:", err);
+            // Hide loading and show dashboard with error
+            hide(loadingSection);
+            show(dashboardSection);
+            connBadge.className = "badge badge-error";
+            connBadge.textContent = "Error";
+            
+            // Show error message briefly on button
+            const originalText = btnText.textContent;
+            btnText.textContent = "Refresh Failed";
+            setTimeout(() => {
+                btnText.textContent = originalText;
+            }, 3000);
+        } finally {
+            // Re-enable button and hide loading spinner
+            btnRefreshDashboard.disabled = false;
+            show(btnText);
+            hide(btnSpinner);
+        }
     });
 
 
@@ -774,7 +839,7 @@
 
     function renderCmpGrouped(rows) {
         const groups = {};
-        rows.forEach(r => {
+        rows.filter(r => r.type !== "Debug Info").forEach(r => {
             const key = r.component_type || "Other";
             if (!groups[key]) groups[key] = [];
             groups[key].push(r);
@@ -1070,17 +1135,26 @@
                 password: document.getElementById("password").value,
             }),
         })
-        .then(resp => resp.json())
+        .then(resp => {
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+            }
+            return resp.json();
+        })
         .then(data => {
             if (data.error) {
                 throw new Error(data.error);
             }
-            updateHealthStatusDisplay(data.health_status);
+            updateHealthStatusDisplay(data.health_status || "Unknown");
         })
         .catch(e => {
-            // Silent fail for auto-refresh, no error display needed
+            console.error("Failed to fetch health metrics:", e);
+            // Update display to show error state
             if (!isAutoRefresh) {
-                console.error("Failed to fetch health metrics:", e);
+                updateHealthStatusDisplay("Error");
+            } else {
+                // For auto-refresh, set to Unknown to avoid constant error display
+                updateHealthStatusDisplay("Unknown");
             }
         });
     }
@@ -1096,6 +1170,15 @@
         } else if (healthStatus === "Warning") {
             status = "warning";
             statusText = "Warning";
+        } else if (healthStatus === "Error") {
+            status = "error";
+            statusText = "Error";
+        } else if (healthStatus === "Unknown" || !healthStatus) {
+            status = "unknown";
+            statusText = "Unknown";
+        } else if (healthStatus === "OK" || healthStatus === "Healthy") {
+            status = "healthy";
+            statusText = "Healthy";
         }
 
         // Update status display
@@ -1169,7 +1252,54 @@
         const results = Object.values(comparison);
 
         if (results.length === 0) {
-            interfaceCmpBody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted);">No comparison results available.</td></tr>';
+            // Show debug information when no results available
+            let debugInfo = '';
+            if (data.debug_info) {
+                debugInfo = `
+                    <div style="text-align:left; margin-top:20px; font-size:0.85rem; color:var(--text-muted);">
+                        <h4>Debug Information:</h4>
+                        <p><strong>Redfish items:</strong> ${data.debug_info.redfish_sample?.length || 0}</p>
+                        <p><strong>Racadm items:</strong> ${data.debug_info.racadm_sample?.length || 0}</p>
+                        <p><strong>IPMI items:</strong> ${data.debug_info.ipmi_sample?.length || 0}</p>
+                        <p><strong>Comparison keys:</strong> ${data.debug_info.comparison_keys?.length || 0}</p>
+                        
+                        ${data.debug_info.redfish_sample?.length > 0 ? `
+                            <p><strong>Redfish sample:</strong></p>
+                            <pre style="background:var(--surface); padding:10px; border-radius:4px; font-size:0.8rem; overflow-x:auto;">
+${JSON.stringify(data.debug_info.redfish_sample[0], null, 2)}
+                            </pre>
+                        ` : ''}
+                        
+                        ${data.debug_info.racadm_sample?.length > 0 ? `
+                            <p><strong>Racadm sample:</strong></p>
+                            <pre style="background:var(--surface); padding:10px; border-radius:4px; font-size:0.8rem; overflow-x:auto;">
+${JSON.stringify(data.debug_info.racadm_sample[0], null, 2)}
+                            </pre>
+                        ` : ''}
+                        
+                        ${data.debug_info.ipmi_sample?.length > 0 ? `
+                            <p><strong>IPMI sample:</strong></p>
+                            <pre style="background:var(--surface); padding:10px; border-radius:4px; font-size:0.8rem; overflow-x:auto;">
+${JSON.stringify(data.debug_info.ipmi_sample[0], null, 2)}
+                            </pre>
+                        ` : ''}
+                        
+                        <p style="margin-top:15px; color:var(--amber);">
+                            <strong>Note:</strong> Interface comparison requires racadm and ipmitool tools to be installed and configured.
+                            If racadm and IPMI counts are 0, these tools may not be available on your system.
+                        </p>
+                    </div>
+                `;
+            }
+            
+            interfaceCmpBody.innerHTML = `
+                <tr>
+                    <td colspan="6" style="text-align:center;padding:20px;color:var(--text-muted);">
+                        <div>No comparison results available.</div>
+                        ${debugInfo}
+                    </td>
+                </tr>
+            `;
             return;
         }
 
@@ -1252,12 +1382,25 @@
         }
 
         fanBody.innerHTML = fans.map((fan, index) => {
-            const pwm = fan.speed || "N/A";
+            const rpm = fan.speed || "N/A";
             const description = fan.description || fan.name || `Fan ${index}`;
+            
             return `
             <tr>
-                <td>${esc(description)}</td>
-                <td>${pwm} PWM</td>
+                <td>
+                    <span style="display: inline-flex; align-items: center; gap: 8px;">
+                        <span class="fan-icon">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="8"/>
+                                <path d="M12 4 L12 8 M12 16 L12 20 M4 12 L8 12 M16 12 L20 12"/>
+                                <path d="M7 7 L9 9 M15 15 L17 17 M17 7 L15 9 M9 15 L7 17"/>
+                                <circle cx="12" cy="12" r="2" fill="currentColor"/>
+                            </svg>
+                        </span>
+                        ${esc(description)}
+                    </span>
+                </td>
+                <td>${rpm} RPM</td>
             </tr>
         `}).join("");
     }

@@ -120,6 +120,21 @@ a { color: var(--accent); text-decoration: none; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Fan blade rotation animation */
+@keyframes fan-spin { 
+    from { transform: rotate(0deg); } 
+    to { transform: rotate(360deg); } 
+}
+
+.fan-icon {
+    animation: fan-spin 2s linear infinite;
+}
+
+.fan-icon svg {
+    transform-origin: center;
+}
+
+
 /* ---- Error Box ----------------------------------------------------- */
 .error-box {
     background: rgba(239,68,68,.1);
@@ -220,6 +235,8 @@ a { color: var(--accent); text-decoration: none; }
 .health-status-icon.healthy { color: var(--green); }
 .health-status-icon.warning { color: var(--amber); }
 .health-status-icon.critical { color: var(--red); }
+.health-status-icon.unknown { color: var(--text-muted); }
+.health-status-icon.error { color: var(--red); }
 
 .health-status-text {
     flex: 1;
@@ -242,6 +259,22 @@ a { color: var(--accent); text-decoration: none; }
 .health-status-value.healthy { color: var(--green); }
 .health-status-value.warning { color: var(--amber); }
 .health-status-value.critical { color: var(--red); }
+.health-status-value.unknown { color: var(--text-muted); }
+.health-status-value.error { color: var(--red); }
+
+.refresh-dashboard-card {
+    text-align: center;
+    padding: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.refresh-dashboard-card .btn {
+    width: 100%;
+    justify-content: center;
+    font-weight: 600;
+}
 
 .btn-full {
     width: 100%;
