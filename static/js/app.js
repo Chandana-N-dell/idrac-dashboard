@@ -433,6 +433,10 @@
         bomFileName.textContent = "Choose Excel file\u2026";
         bomFileLabel.classList.remove("has-file");
         btnCompare.disabled = true;
+        btnCompareSingle.disabled = true;
+        bomSheetSelect.innerHTML = '<option value="">Select sheet&hellip;</option>';
+        hide(sheetSelectionRow);
+        hide(compareButtonRow);
         hide(bomError);
         hide(comparisonSection);
         cmpSummaryEl.innerHTML = "";
@@ -451,13 +455,16 @@
     // BOM / Excel Comparison Logic
     // ==================================================================
 
-    const bomFileInput      = document.getElementById("bom-file");
-    const bomFileName       = document.getElementById("bom-file-name");
-    const bomFileLabel      = document.querySelector(".file-label");
-    const btnCompare        = document.getElementById("btn-compare");
+    const bomFile          = document.getElementById("bom-file");
+    const bomFileName      = document.getElementById("bom-file-name");
+    const btnCompare       = document.getElementById("btn-compare");
+    const btnCompareSingle = document.getElementById("btn-compare-single");
+    const bomError         = document.getElementById("bom-error");
+    const sheetSelectionRow = document.getElementById("sheet-selection-row");
+    const compareButtonRow = document.getElementById("compare-button-row");
+    const bomSheetSelect = document.getElementById("bom-sheet-select");
     const btnCompareText    = btnCompare.querySelector(".btn-text");
     const btnCompareSpinner = btnCompare.querySelector(".btn-spinner");
-    const bomError          = document.getElementById("bom-error");
     const comparisonSection = document.getElementById("comparison-section");
     const cmpSummaryEl      = document.getElementById("cmp-summary");
     const cmpSearch         = document.getElementById("cmp-search");
@@ -474,18 +481,64 @@
     let cmpIsGrouped   = false;
 
     // ── File input handling ───────────────────────────────────────────
-    bomFileInput.addEventListener("change", () => {
+    bomFileInput.addEventListener("change", async () => {
         const file = bomFileInput.files[0];
         if (file) {
             bomFileName.textContent = file.name;
             bomFileLabel.classList.add("has-file");
-            btnCompare.disabled = false;
             hide(bomError);
+
+            // Fetch sheet names from the uploaded file
+            try {
+                const formData = new FormData();
+                formData.append("file", file);
+
+                const resp = await fetch("/api/get-excel-sheets", {
+                    method: "POST",
+                    body: formData,
+                });
+
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || "Failed to get sheet names");
+
+                const sheets = data.sheets || [];
+
+                if (sheets.length > 1) {
+                    // Show sheet selection dropdown
+                    bomSheetSelect.innerHTML = '<option value="">Select sheet&hellip;</option>' +
+                        sheets.map(sheet => `<option value="${esc(sheet)}">${esc(sheet)}</option>`).join("");
+                    show(sheetSelectionRow);
+                    hide(compareButtonRow);
+                    btnCompare.disabled = true;
+                } else if (sheets.length === 1) {
+                    // Single sheet - show compare button directly
+                    hide(sheetSelectionRow);
+                    show(compareButtonRow);
+                    btnCompareSingle.disabled = false;
+                    bomSheetSelect.value = sheets[0];
+                } else {
+                    // No sheets found
+                    bomError.textContent = "No sheets found in Excel file.";
+                    show(bomError);
+                    btnCompare.disabled = true;
+                }
+            } catch (err) {
+                bomError.textContent = err.message || "Failed to read Excel file.";
+                show(bomError);
+                btnCompare.disabled = true;
+            }
         } else {
             bomFileName.textContent = "Choose Excel file\u2026";
             bomFileLabel.classList.remove("has-file");
             btnCompare.disabled = true;
+            hide(sheetSelectionRow);
+            hide(compareButtonRow);
         }
+    });
+
+    // ── Sheet selection change ───────────────────────────────────────────
+    bomSheetSelect.addEventListener("change", () => {
+        btnCompare.disabled = !bomSheetSelect.value;
     });
 
     // ── Compare button ────────────────────────────────────────────────
@@ -504,6 +557,13 @@
             return;
         }
 
+        const selectedSheet = bomSheetSelect.value;
+        if (!selectedSheet) {
+            bomError.textContent = "Please select a sheet.";
+            show(bomError);
+            return;
+        }
+
         // UI → loading
         btnCompare.disabled = true;
         hide(btnCompareText);
@@ -513,6 +573,7 @@
             const formData = new FormData();
             formData.append("file", file);
             formData.append("inventory", JSON.stringify(inventoryData));
+            formData.append("sheet_name", selectedSheet);
 
             const resp = await fetch("/api/compare", {
                 method: "POST",
@@ -532,6 +593,56 @@
             btnCompare.disabled = !bomFileInput.files[0];
             show(btnCompareText);
             hide(btnCompareSpinner);
+        }
+    });
+
+    // ── Compare button for single sheet ─────────────────────────────────
+    btnCompareSingle.addEventListener("click", async () => {
+        hide(bomError);
+
+        const file = bomFileInput.files[0];
+        if (!file) {
+            bomError.textContent = "Please select an Excel file first.";
+            show(bomError);
+            return;
+        }
+        if (!inventoryData.length) {
+            bomError.textContent = "No inventory data available. Fetch inventory from iDRAC first.";
+            show(bomError);
+            return;
+        }
+
+        // UI → loading
+        btnCompareSingle.disabled = true;
+        const btnText = btnCompareSingle.querySelector(".btn-text");
+        const btnSpinner = btnCompareSingle.querySelector(".btn-spinner");
+        hide(btnText);
+        show(btnSpinner);
+
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("inventory", JSON.stringify(inventoryData));
+            formData.append("sheet_name", bomSheetSelect.value);
+
+            const resp = await fetch("/api/compare", {
+                method: "POST",
+                body: formData,
+            });
+
+            const data = await resp.json();
+            if (!resp.ok) throw { message: data.error || "Comparison failed" };
+
+            comparisonData = data.results || [];
+            renderComparison(data.summary);
+
+        } catch (err) {
+            bomError.textContent = err.message || "An error occurred during comparison.";
+            show(bomError);
+        } finally {
+            btnCompareSingle.disabled = !bomFileInput.files[0];
+            show(btnText);
+            hide(btnSpinner);
         }
     });
 

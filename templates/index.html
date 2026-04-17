@@ -235,7 +235,21 @@
                             <span id="bom-file-name">Choose Excel file&hellip;</span>
                             <input type="file" id="bom-file" accept=".xlsx,.xls" hidden>
                         </label>
+                    </div>
+                    <div class="bom-upload-row hidden" id="sheet-selection-row">
+                        <select id="bom-sheet-select" class="filter-select">
+                            <option value="">Select sheet&hellip;</option>
+                        </select>
                         <button id="btn-compare" class="btn btn-accent btn-sm" disabled>
+                            <span class="btn-text">Compare</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Comparing&hellip;
+                            </span>
+                        </button>
+                    </div>
+                    <div class="bom-upload-row hidden" id="compare-button-row">
+                        <button id="btn-compare-single" class="btn btn-accent btn-sm" disabled>
                             <span class="btn-text">Compare</span>
                             <span class="btn-spinner hidden">
                                 <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
