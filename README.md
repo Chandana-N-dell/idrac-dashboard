@@ -196,8 +196,33 @@ idrac-dashboard/
 - **System info table** -- Model, Service Tag, BIOS, Memory, CPU at top-left
 - **Fan details table** -- Fan descriptions, RPM, and tier badge at top-middle
 - **System health card** -- Real-time health status with auto-refresh at top-right
+- **Interface comparison page** -- Compare inventory across Redfish, racadm, and IPMI
 - **CSV export** -- exports the current filtered view
 - **Dark theme** responsive design
+
+### Interface Comparison
+- **Multi-interface comparison**: Compare inventory across Redfish, racadm hwinventory, and IPMI FRU
+- **Normalized data**: Component types standardized across all interfaces (Processor, Memory, Network Adapter, etc.)
+- **Discrepancy detection**: Identifies components missing from one or more interfaces
+- **Field-level comparison**: Compares part numbers, device descriptions, and serial numbers
+- **Structured JSON output**: Machine-readable comparison results with status flags
+- **Status categories**: Match, missing_redfish, missing_racadm, missing_ipmi, description_mismatch
+
+**Interface Comparison Requirements:**
+- **racadm**: Must be installed locally or accessible via SSH to run `racadm hwinventory`
+- **ipmitool**: Must be installed to run `ipmitool fru` commands
+- **IPMI access**: IPMI must be configured on the target server
+- **Graceful handling**: Returns empty results if tools are not installed
+
+**Comparison Status Codes:**
+- `match`: Component found in all three interfaces with matching data
+- `missing_redfish`: Component found in racadm and IPMI but not Redfish
+- `missing_racadm`: Component found in Redfish and IPMI but not racadm
+- `missing_ipmi`: Component found in Redfish and racadm but not IPMI
+- `redfish_only`: Component found only in Redfish
+- `racadm_only`: Component found only in racadm
+- `ipmi_only`: Component found only in IPMI
+- `description_mismatch`: Component found in all interfaces but descriptions differ
 
 ### BOM Comparison
 - **Upload Excel (.xlsx)** with expected part numbers to compare against live inventory
@@ -227,6 +252,7 @@ idrac-dashboard/
 | POST | `/api/inventory` | Fetch inventory from iDRAC (accepts host/username/password) |
 | POST | `/api/health` | Fetch system health metrics (accepts host/username/password) |
 | POST | `/api/fans` | Fetch fan details from iDRAC Hardware Inventory (accepts host/username/password) |
+| POST | `/api/inventory-comparison` | Compare inventory across Redfish, racadm, and IPMI interfaces |
 | POST | `/api/export-csv` | Export inventory as CSV |
 | POST | `/api/compare` | Upload Excel BOM + inventory JSON, returns comparison results |
 | POST | `/api/export-comparison-csv` | Export comparison results as CSV |
