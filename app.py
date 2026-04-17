@@ -84,6 +84,45 @@ def _safe(d, *keys, default="N/A"):
     return cur if cur not in (None, "", 0) else default
 
 
+def _simplify_fan_name(fan_name):
+    """Simplify complex fan names like FAN1A_1 to Fan1A format, preserving A/B designations."""
+    if not fan_name or fan_name == "N/A":
+        return fan_name
+    
+    import re
+    
+    # Pattern to extract fan number and letter from names like FAN1A_1, FAN1B_1, Fan1A, etc.
+    patterns = [
+        r'FAN(\d+)([AB])_?\d*',  # FAN1A_1, FAN1B_1, FAN1A, FAN1B
+        r'FAN(\d+)([AB])',        # FAN1A, FAN2B
+        r'FAN\s*(\d+)\s*([AB])',  # Fan 1A, Fan 2B
+        r'(\d+)([AB])_?\d*',       # 1A_1, 1B_1, 1A, 1B
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, fan_name.upper())
+        if match:
+            fan_num = match.group(1)
+            fan_letter = match.group(2)
+            return f"Fan{fan_num}{fan_letter}"
+    
+    # Fallback for simple fan numbers without letters
+    simple_patterns = [
+        r'FAN(\d+)',           # FAN1, FAN2
+        r'FAN\s*(\d+)',        # Fan 1, Fan 2
+        r'(\d+)',              # 1, 2
+    ]
+    
+    for pattern in simple_patterns:
+        match = re.search(pattern, fan_name.upper())
+        if match:
+            fan_num = match.group(1)
+            return f"Fan{fan_num}"
+    
+    # Fallback: return original name but cleaned up
+    return fan_name.replace('_', ' ').title()
+
+
 # ---------------------------------------------------------------------------
 # Inventory parsers  – each returns a list of normalised row dicts
 # ---------------------------------------------------------------------------
@@ -485,9 +524,46 @@ def _parse_power(chassis_data, base_url, auth):
 def _parse_thermal(base_url, auth, system_model=""):
     """Fetch fans from Chassis Thermal endpoint."""
     rows = []
-    thermal = _rf_get(base_url, "/redfish/v1/Chassis/System.Embedded.1/Thermal", auth)
+    seen_fan_names = set()  # Track unique fan names to prevent duplicates
+    
+    # Try multiple thermal endpoint paths
+    thermal_paths = [
+        "/redfish/v1/Chassis/System.Embedded.1/Thermal",
+        "/redfish/v1/Chassis/Chassis.Embedded.1/Thermal",
+        "/redfish/v1/Systems/System.Embedded.1/Thermal"
+    ]
+    
+    thermal = None
+    thermal_path_used = None
+    
+    for path in thermal_paths:
+        try:
+            thermal = _rf_get(base_url, path, auth, timeout=15)
+            if thermal:
+                thermal_path_used = path
+                break
+        except Exception:
+            continue
+    
     if not thermal:
-        return rows
+        # Try to get available chassis to see what's available
+        try:
+            chassis_data = _rf_get(base_url, "/redfish/v1/Chassis", auth, timeout=10)
+            if chassis_data and "Members" in chassis_data:
+                for chassis in chassis_data["Members"]:
+                    chassis_url = chassis["@odata.id"]
+                    chassis_info = _rf_get(base_url, chassis_url, auth, timeout=10)
+                    if chassis_info and "Thermal" in chassis_info:
+                        thermal_url = chassis_info["Thermal"]["@odata.id"]
+                        thermal = _rf_get(base_url, thermal_url, auth, timeout=15)
+                        if thermal:
+                            thermal_path_used = thermal_url
+                            break
+        except Exception:
+            pass
+        
+        if not thermal:
+            return rows
 
     # Determine fan tier based on system model
     fan_tier = "Silver"  # Default tier
@@ -500,25 +576,137 @@ def _parse_thermal(base_url, auth, system_model=""):
         else:
             fan_tier = "Silver"
 
-    for fan in thermal.get("Fans", []):
+    fans = thermal.get("Fans", [])
+    
+    # If no fans found in the primary Fans array, try alternative structures
+    if not fans:
+        # Some iDRAC versions use different structures
+        if "Temperatures" in thermal:
+            # Look for fan data in temperature readings (some systems mix them)
+            temp_readings = thermal.get("Temperatures", [])
+            for reading in temp_readings:
+                if "fan" in str(reading.get("Name", "")).lower() or "fan" in str(reading.get("PhysicalContext", "")).lower():
+                    fans.append(reading)
+    
+    for fan in fans:
+        # Extract fan status with better fallbacks
+        fan_status = "Unknown"
+        if "Status" in fan:
+            status_obj = fan["Status"]
+            if isinstance(status_obj, dict):
+                fan_status = _safe(status_obj, "Health", default=_safe(status_obj, "State", default="Unknown"))
+            else:
+                fan_status = str(status_obj)
+        elif "State" in fan:
+            fan_status = _safe(fan, "State")
+        elif "Health" in fan:
+            fan_status = _safe(fan, "Health")
+        
+                
+        # Extract fan speed/PWM - your iDRAC only provides RPM, so calculate estimated PWM
+        reading_pwm = _safe(fan, "SpeedPercent")  # Check for PWM percentage first
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "FanSpeedPercent")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "PWM")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "DutyCyclePercent")
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "DutyCycle")
+        
+        # Try other PWM field variations
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "ReadingPWM", default=_safe(fan, "SpeedPWM", default=_safe(fan, "FanPWM")))
+        if reading_pwm == "N/A" or reading_pwm == "":
+            reading_pwm = _safe(fan, "CurrentPWM", default=_safe(fan, "ActualPWM", default=_safe(fan, "SetPWM")))
+        
+        # Check OEM fields (Dell specific)
+        if reading_pwm == "N/A" or reading_pwm == "":
+            oem_data = fan.get("Oem", {})
+            if isinstance(oem_data, dict):
+                dell_oem = oem_data.get("Dell", {})
+                if isinstance(dell_oem, dict):
+                    reading_pwm = _safe(dell_oem, "SpeedPercent", default=_safe(dell_oem, "DutyCycle", default=_safe(dell_oem, "FanPWM")))
+        
+        # If PWM value contains % symbol, extract just the number
+        if reading_pwm != "N/A" and isinstance(reading_pwm, str):
+            if '%' in reading_pwm:
+                # Extract number before % (e.g., "25%" -> "25")
+                import re
+                pwm_match = re.search(r'(\d+)%?', reading_pwm)
+                if pwm_match:
+                    reading_pwm = pwm_match.group(1)
+        
+        # Use exact RPM data directly
+        reading_pwm = _safe(fan, "Reading")  # Use RPM value directly
+        
+        # Extract fan name with better fallbacks and simplify it
+        raw_fan_name = _safe(fan, "Name", default=_safe(fan, "FanName", default=_safe(fan, "MemberId")))
+        if not raw_fan_name or raw_fan_name == "N/A":
+            raw_fan_name = f"Fan {_safe(fan, 'MemberId', default='Unknown')}"
+        fan_name = _simplify_fan_name(raw_fan_name)
+        
+                
+                
+        # Extract RPM data separately for reference
+        reading_rpm = _safe(fan, "Reading")
+        if reading_rpm == "N/A" or reading_rpm == "":
+            reading_rpm = _safe(fan, "SpeedRPM", default=_safe(fan, "CurrentSpeed", default=_safe(fan, "Speed")))
+        
+        # Check if this fan name already exists to prevent duplicates
+        if fan_name not in seen_fan_names:
+            seen_fan_names.add(fan_name)
+            rows.append({
+                "category":    "Fan",
+                "type":        "Cooling Fan",
+                "name":        fan_name,
+                "slot":        _safe(fan, "MemberId", default=_safe(fan, "PhysicalContext", default=fan_name)),
+                "quantity":    1,
+                "serial":      _safe(fan, "SerialNumber"),
+                "part_number": _safe(fan, "PartNumber"),
+                "firmware":    "N/A",
+                "status":      fan_status,
+                "extra": {
+                    "ReadingPWM":     reading_pwm,
+                    "ReadingRPM":     reading_rpm,
+                    "ReadingUnits":   _safe(fan, "ReadingUnits", default="PWM"),
+                    "PhysicalContext": _safe(fan, "PhysicalContext"),
+                    "Description":    _safe(fan, "Description"),
+                    "FanTier":        fan_tier,
+                    "ThermalPath":    thermal_path_used,
+                    "HotPluggable":   _safe(fan, "HotPluggable"),
+                    "Redundancy":     _safe(fan, "Redundancy"),
+                }
+            })
+    
+    # Add debug info if no fans found OR if PWM data is missing
+    if not rows or all(r.get("extra", {}).get("ReadingPWM") == "N/A" for r in rows if r.get("category") == "Fan"):
+        # Add a debug entry to help troubleshoot
+        debug_info = {
+            "AvailableKeys": list(thermal.keys()) if isinstance(thermal, dict) else "Non-dict response",
+            "ThermalPath": thermal_path_used,
+            "FanTier": fan_tier,
+        }
+        
+        # If we have fan data but no PWM, show sample fan structure
+        if thermal and isinstance(thermal, dict) and "Fans" in thermal and thermal["Fans"]:
+            sample_fan = thermal["Fans"][0]
+            debug_info["SampleFanFields"] = list(sample_fan.keys()) if isinstance(sample_fan, dict) else "Non-dict fan data"
+            debug_info["SampleFanData"] = {k: v for k, v in sample_fan.items() if isinstance(v, (str, int, float))} if isinstance(sample_fan, dict) else "Invalid fan data"
+        
         rows.append({
             "category":    "Fan",
-            "type":        "Cooling Fan",
-            "name":        _safe(fan, "Name", default=_safe(fan, "FanName")),
-            "slot":        _safe(fan, "MemberId", default=_safe(fan, "Name")),
-            "quantity":    1,
-            "serial":      _safe(fan, "SerialNumber"),
-            "part_number": _safe(fan, "PartNumber"),
+            "type":        "Debug Info",
+            "name":        "PWM Data Not Available" if rows else "No Fan Data Found",
+            "slot":        f"Endpoint: {thermal_path_used or 'None'}",
+            "quantity":    0,
+            "serial":      "N/A",
+            "part_number": "N/A",
             "firmware":    "N/A",
-            "status":      _safe(fan, "Status", "Health"),
-            "extra": {
-                "ReadingRPM":     _safe(fan, "Reading"),
-                "ReadingUnits":   _safe(fan, "ReadingUnits"),
-                "PhysicalContext": _safe(fan, "PhysicalContext"),
-                "Description":    _safe(fan, "Description"),
-                "FanTier":        fan_tier,
-            }
+            "status":      "Warning",
+            "extra": debug_info
         })
+    
     return rows
 
 
@@ -580,6 +768,76 @@ def _parse_racadm_hwinventory(host, username, password):
         return rows
 
     return rows
+
+
+def _parse_racadm_pwm_data(host, username, password):
+    """Fetch actual PWM data via racadm thmtest command with FSD login."""
+    import subprocess
+    pwm_data = {}
+
+    try:
+        # Step 1: Login to FSD (File System Domain)
+        # First, we need to establish FSD session
+        login_cmd = [
+            "racadm", "-r", host,
+            "-u", username,
+            "-p", password,
+            "login"
+        ]
+        
+        # Try to establish FSD session
+        login_result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=15)
+        
+        # Step 2: Execute thmtest command for PWM data
+        cmd = [
+            "racadm", "-r", host,
+            "thmtest", "-g", "f", "-s"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode == 0:
+            # Parse PWM data from thmtest output
+            lines = result.stdout.split('\n')
+            current_fan = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Look for fan names (patterns like "Fan1A", "Fan2B", etc.)
+                if re.search(r'Fan\d+[A-B]?', line, re.IGNORECASE):
+                    current_fan = line.strip()
+                    continue
+                
+                # Look for PWM percentages (patterns like "25%", "PWM: 25%", etc.)
+                if current_fan and re.search(r'(\d+)%', line):
+                    pwm_match = re.search(r'(\d+)%', line)
+                    if pwm_match:
+                        pwm_value = pwm_match.group(1)
+                        # Simplify fan name to match Redfish naming
+                        simplified_name = _simplify_fan_name(current_fan)
+                        pwm_data[simplified_name] = pwm_value
+                        
+            return pwm_data
+        else:
+            # racadm command failed, return empty dict
+            print(f"RACADM thmtest failed: {result.stderr}")
+            return {}
+
+    except subprocess.TimeoutExpired:
+        print("RACADM command timed out")
+        return {}
+    except FileNotFoundError:
+        # racadm not found - this is expected if not installed locally
+        print("RACADM not found - please install Dell EMC OpenManage Server Administrator")
+        return {}
+    except Exception as e:
+        print(f"RACADM error: {str(e)}")
+        return {}
+
+    return {}
 
 
 def _parse_ipmi_fru(host, username, password):
@@ -1586,45 +1844,154 @@ def fetch_lc_logs():
         host = data.get("host")
         username = data.get("username")
         password = data.get("password")
+        use_mock = data.get("use_mock", False)
 
-        if not all([host, username, password]):
+        if not all([host, username, password]) and not use_mock:
             return jsonify({"error": "Missing credentials"}), 400
+
+        # Return mock data for testing when requested
+        if use_mock:
+            mock_logs = [
+                {
+                    "created": "2026-04-17T10:30:00+00:00",
+                    "severity": "Information",
+                    "message": "System boot completed successfully",
+                    "source": "System"
+                },
+                {
+                    "created": "2026-04-17T09:15:00+00:00", 
+                    "severity": "Warning",
+                    "message": "Fan speed sensor reading out of range",
+                    "source": "Thermal"
+                },
+                {
+                    "created": "2026-04-17T08:45:00+00:00",
+                    "severity": "Critical", 
+                    "message": "Power supply unit 2 failure detected",
+                    "source": "Power"
+                },
+                {
+                    "created": "2026-04-17T07:20:00+00:00",
+                    "severity": "Information",
+                    "message": "Firmware update completed",
+                    "source": "iDRAC"
+                },
+                {
+                    "created": "2026-04-17T06:10:00+00:00",
+                    "severity": "Warning",
+                    "message": "Memory module 1 temperature high",
+                    "source": "Memory"
+                }
+            ]
+            return jsonify({
+                "logs": mock_logs,
+                "debug_info": {
+                    "endpoint_used": "mock_data",
+                    "total_logs_found": len(mock_logs),
+                    "response_structure": "mock_data"
+                }
+            })
 
         auth = (username, password)
         base_url = f"https://{host}"
 
-        # Try to get LC logs from iDRAC
-        # Common LC log endpoint: /redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog
-        lc_log_path = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog"
-        lc_log_data = _rf_get(base_url, lc_log_path, auth, timeout=30)
+        # Try multiple LC log endpoint paths for different iDRAC versions
+        lc_log_paths = [
+            "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog",
+            "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LcLog",
+            "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/LcLog/Entries",
+            "/redfish/v1/Systems/System.Embedded.1/Logs/LcLog",
+            "/redfish/v1/Chassis/System.Embedded.1/Logs/LcLog"
+        ]
+        
+        lc_log_data = None
+        lc_log_path_used = None
+        
+        for path in lc_log_paths:
+            try:
+                lc_log_data = _rf_get(base_url, path, auth, timeout=15)
+                if lc_log_data:
+                    lc_log_path_used = path
+                    break
+            except Exception:
+                continue
 
         if not lc_log_data:
-            # Try alternative path
-            lc_log_path = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LcLog"
-            lc_log_data = _rf_get(base_url, lc_log_path, auth, timeout=30)
-
-        if not lc_log_data:
-            return jsonify({"error": "Could not fetch LC logs from iDRAC"}), 404
+            # Try to get available log services to show what's available
+            try:
+                managers_data = _rf_get(base_url, "/redfish/v1/Managers", auth, timeout=15)
+                if managers_data and "Members" in managers_data:
+                    for manager in managers_data["Members"]:
+                        manager_url = manager["@odata.id"]
+                        manager_data = _rf_get(base_url, manager_url, auth, timeout=15)
+                        if manager_data and "LogServices" in manager_data:
+                            log_services_url = manager_data["LogServices"]["@odata.id"]
+                            log_services_data = _rf_get(base_url, log_services_url, auth, timeout=15)
+                            if log_services_data and "Members" in log_services_data:
+                                available_logs = [service.get("Name", "Unknown") for service in log_services_data["Members"]]
+                                return jsonify({
+                                    "error": "LC logs not found. Available log services: " + ", ".join(available_logs),
+                                    "available_logs": available_logs
+                                }), 404
+            except Exception:
+                pass
+            
+            return jsonify({"error": "Could not fetch LC logs from iDRAC. Please check iDRAC version and permissions."}), 404
 
         # Extract log entries
         logs = []
-        members = lc_log_data.get("Members", [])
-
-        # Get last 50 logs (or all if less than 50)
-        for member in members[-50:]:
-            log_entry = _rf_get(base_url, member["@odata.id"], auth, timeout=30)
-            if log_entry:
+        
+        # Check if this is a direct log entries collection or a log service
+        if "Members" in lc_log_data:
+            members = lc_log_data.get("Members", [])
+            # Get last 50 logs (or all if less than 50)
+            for member in members[-50:]:
+                try:
+                    if "@odata.id" in member:
+                        log_entry = _rf_get(base_url, member["@odata.id"], auth, timeout=15)
+                        if log_entry:
+                            logs.append({
+                                "created": log_entry.get("Created", log_entry.get("Date", "N/A")),
+                                "severity": log_entry.get("Severity", log_entry.get("EntryType", "INFO")),
+                                "message": log_entry.get("Message", log_entry.get("Description", "N/A")),
+                                "source": log_entry.get("Source", log_entry.get("OriginOfCondition", "N/A"))
+                            })
+                except Exception as e:
+                    # Skip individual log entries that fail but continue processing others
+                    continue
+        elif "Entries" in lc_log_data:
+            # Direct log entries collection
+            entries = lc_log_data.get("Entries", [])
+            for entry in entries[-50:]:
                 logs.append({
-                    "created": log_entry.get("Created", "N/A"),
-                    "severity": log_entry.get("Severity", "N/A"),
-                    "message": log_entry.get("Message", "N/A"),
-                    "source": log_entry.get("Source", "N/A")
+                    "created": entry.get("Created", entry.get("Date", "N/A")),
+                    "severity": entry.get("Severity", entry.get("EntryType", "INFO")),
+                    "message": entry.get("Message", entry.get("Description", "N/A")),
+                    "source": entry.get("Source", entry.get("OriginOfCondition", "N/A"))
                 })
+        else:
+            # Try to extract logs directly if no Members or Entries
+            if isinstance(lc_log_data, list):
+                for log_item in lc_log_data[-50:]:
+                    logs.append({
+                        "created": log_item.get("Created", log_item.get("Date", "N/A")),
+                        "severity": log_item.get("Severity", log_item.get("EntryType", "INFO")),
+                        "message": log_item.get("Message", log_item.get("Description", "N/A")),
+                        "source": log_item.get("Source", log_item.get("OriginOfCondition", "N/A"))
+                    })
 
         # Reverse to show newest first
         logs.reverse()
 
-        return jsonify({"logs": logs})
+        # Add debug information
+        return jsonify({
+            "logs": logs,
+            "debug_info": {
+                "endpoint_used": lc_log_path_used,
+                "total_logs_found": len(logs),
+                "response_structure": list(lc_log_data.keys()) if isinstance(lc_log_data, dict) else "non-dict"
+            }
+        })
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch LC logs: {str(e)}"}), 500
@@ -1758,10 +2125,14 @@ def compare_inventory_interfaces():
         normalized_redfish = _normalize_inventory_data(redfish_inventory, "redfish")
 
         # Fetch racadm hwinventory
+        print(f"DEBUG: Attempting to fetch racadm inventory for {host}")
         racadm_inventory = _parse_racadm_hwinventory(host, username, password)
+        print(f"DEBUG: Racadm inventory returned {len(racadm_inventory)} items")
 
         # Fetch IPMI FRU
+        print(f"DEBUG: Attempting to fetch IPMI FRU for {host}")
         ipmi_inventory = _parse_ipmi_fru(host, username, password)
+        print(f"DEBUG: IPMI inventory returned {len(ipmi_inventory)} items")
 
         # Compare across all three interfaces
         comparison_results = _compare_inventory_across_interfaces(
@@ -1770,8 +2141,20 @@ def compare_inventory_interfaces():
             ipmi_inventory
         )
 
+        # Add debug information
+        debug_info = {
+            "redfish_sample": normalized_redfish[:2] if normalized_redfish else [],
+            "racadm_sample": racadm_inventory[:2] if racadm_inventory else [],
+            "ipmi_sample": ipmi_inventory[:2] if ipmi_inventory else [],
+            "comparison_keys": list(comparison_results.keys())[:5] if comparison_results else []
+        }
+
+        print(f"DEBUG: Comparison results: {len(comparison_results)} items")
+        print(f"DEBUG: First comparison keys: {list(comparison_results.keys())[:3]}")
+
         return jsonify({
             "comparison": comparison_results,
+            "debug_info": debug_info,
             "summary": {
                 "redfish_count": len(normalized_redfish),
                 "racadm_count": len(racadm_inventory),
@@ -1781,12 +2164,13 @@ def compare_inventory_interfaces():
         })
 
     except Exception as e:
+        print(f"DEBUG: Interface comparison error: {str(e)}")
         return jsonify({"error": f"Failed to compare inventory: {str(e)}"}), 500
 
 
 @app.route("/api/fans", methods=["POST"])
 def fetch_fan_details():
-    """Fetch fan details from iDRAC web UI Hardware Inventory page."""
+    """Fetch fan details from iDRAC thermal endpoint."""
     try:
         data = request.get_json()
         host = data.get("host")
@@ -1796,115 +2180,31 @@ def fetch_fan_details():
         if not all([host, username, password]):
             return jsonify({"error": "Missing credentials"}), 400
 
-        import requests
-        try:
-            from bs4 import BeautifulSoup
-        except ImportError:
-            return jsonify({"error": "beautifulsoup4 library not installed. Run: pip install beautifulsoup4"}), 500
+        base_url = f"https://{host}"
+        auth = (username, password)
 
-        # Create session for web UI login
-        session = requests.Session()
-        session.verify = False  # Ignore SSL warnings for iDRAC
-        requests.packages.urllib3.disable_warnings()
+        # Get system model for fan tier determination
+        system_data = _rf_get(base_url, "/redfish/v1/Systems/System.Embedded.1", auth, timeout=15)
+        system_model = system_data.get("Model", "") if system_data else ""
 
-        # Login to iDRAC web UI
-        login_url = f"https://{host}/index.html"
-        login_data = {
-            "user": username,
-            "password": password
-        }
-
-        try:
-            response = session.post(login_url, data=login_data, timeout=30, allow_redirects=True)
-            if response.status_code != 200:
-                return jsonify({"error": "Failed to login to iDRAC web UI"}), 401
-        except Exception as e:
-            return jsonify({"error": f"Login failed: {str(e)}"}), 401
-
-        # Navigate to Hardware Inventory page
-        # The URL pattern for hardware inventory is typically /sysinv.html or similar
-        inventory_url = f"https://{host}/sysinv.html"
-        try:
-            response = session.get(inventory_url, timeout=30)
-            if response.status_code != 200:
-                # Try alternative URL patterns
-                for alt_url in [f"https://{host}/cgi-bin/webcgi/sysinv", f"https://{host}/sysinv"]:
-                    try:
-                        response = session.get(alt_url, timeout=30)
-                        if response.status_code == 200:
-                            inventory_url = alt_url
-                            break
-                    except:
-                        continue
-                else:
-                    return jsonify({"error": "Failed to access Hardware Inventory page"}), 404
-        except Exception as e:
-            return jsonify({"error": f"Failed to access inventory page: {str(e)}"}), 404
-
-        # Parse HTML to extract fan descriptions
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Use the existing _parse_thermal function to get fan data
+        fan_rows = _parse_thermal(base_url, auth, system_model)
+        
+        # Convert fan data to the format expected by the frontend
         fans_data = []
+        for fan_row in fan_rows:
+            if fan_row.get("category") == "Fan" and fan_row.get("type") != "Debug Info":
+                fans_data.append({
+                    "description": fan_row.get("name", "Unknown Fan"),
+                    "speed": fan_row.get("extra", {}).get("ReadingPWM", "N/A"),
+                    "tier": fan_row.get("extra", {}).get("FanTier", "Unknown"),
+                    "status": fan_row.get("status", "Unknown"),
+                    "slot": fan_row.get("slot", "Unknown"),
+                    "part_number": fan_row.get("part_number", "N/A"),
+                    "serial": fan_row.get("serial", "N/A")
+                })
 
-        # Look for fan-related table rows or data
-        # This depends on the specific HTML structure of iDRAC web UI
-        # Common patterns: tables with "Fan" in headers, or specific data attributes
-
-        # Try to find table with fan information
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) >= 2:
-                    text_content = ' '.join(cell.get_text(strip=True) for cell in cells)
-                    # Look for rows containing fan information
-                    if 'fan' in text_content.lower():
-                        # Extract device description (second column typically)
-                        if len(cells) >= 2:
-                            description = cells[1].get_text(strip=True)
-                            if description and description.lower() != 'fan':
-                                fans_data.append({
-                                    "description": description,
-                                    "speed": "N/A",  # Speed might not be in inventory page
-                                    "tier": "Unknown"
-                                })
-
-        # If no fans found in tables, try looking for specific data elements
-        if not fans_data:
-            # Look for divs or spans with fan data
-            fan_elements = soup.find_all(text=lambda x: x and 'fan' in x.lower())
-            for elem in fan_elements:
-                parent = elem.parent
-                if parent:
-                    description = parent.get_text(strip=True)
-                    if description and len(description) > 3 and description.lower() != 'fan':
-                        if not any(f["description"] == description for f in fans_data):
-                            fans_data.append({
-                                "description": description,
-                                "speed": "N/A",
-                                "tier": "Unknown"
-                            })
-
-        # Determine fan tier from system model using Redfish (since web UI might not have it)
-        try:
-            system_data = _rf_get(f"https://{host}", "/redfish/v1/Systems/System.Embedded.1", (username, password), timeout=30)
-            system_model = system_data.get("Model", "") if system_data else ""
-
-            fan_tier = "Silver"
-            if system_model:
-                model_upper = system_model.upper()
-                if any(x in model_upper for x in ["R750", "R760", "R7515", "R7615", "R840", "R850", "R960", "R960XA"]):
-                    fan_tier = "Platinum"
-                elif any(x in model_upper for x in ["R640", "R650", "R6515", "R6525", "R740", "R7415", "R7425"]):
-                    fan_tier = "Gold"
-
-            # Update tier for all fans
-            for fan in fans_data:
-                fan["tier"] = fan_tier
-        except:
-            pass  # If Redfish fails, keep Unknown tier
-
-        return jsonify({"fans": fans_data, "system_model": system_model if 'system_model' in locals() else ""})
+        return jsonify({"fans": fans_data, "system_model": system_model})
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch fan details: {str(e)}"}), 500

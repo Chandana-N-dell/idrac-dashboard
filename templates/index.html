@@ -130,7 +130,7 @@
                         <table class="system-info-table" id="fan-info-table">
                             <thead>
                                 <tr>
-                                    <th>Fan</th>
+                                    <th> Fan</th>
                                     <th>Speed (RPM)</th>
                                 </tr>
                             </thead>
@@ -152,6 +152,17 @@
                                 <div class="health-status-value" id="health-status-value">Connecting...</div>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Refresh Dashboard Button -->
+                    <div class="refresh-dashboard-card">
+                        <button id="btn-refresh-dashboard" class="btn btn-primary">
+                            <span class="btn-text">Refresh Dashboard</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Refreshing&hellip;
+                            </span>
+                        </button>
                     </div>
                 </div>
 
@@ -323,13 +334,12 @@
                 <div class="logs-section">
                     <div class="logs-header">
                         <h3 class="section-title">LC Logs (Last 50)</h3>
-                        <button id="btn-fetch-logs" class="btn btn-primary btn-sm">
-                            <span class="btn-text">Fetch Logs</span>
-                            <span class="btn-spinner hidden">
+                        <div class="logs-loading">
+                            <span class="loading-spinner hidden">
                                 <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
-                                Fetching&hellip;
+                                Loading logs&hellip;
                             </span>
-                        </button>
+                        </div>
                     </div>
                     <p class="subtitle">View the last 50 Lifecycle Controller logs from the iDRAC system.</p>
                     <div id="logs-error" class="error-box hidden"></div>
