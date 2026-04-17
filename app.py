@@ -1136,11 +1136,34 @@ def _resolve_categories(comp_type_raw):
 
 def _infer_component_type_from_pn(assy_dpn, part_number, description):
     """
-    Try to infer component type from part number patterns or description.
+    Try to infer component type from description field in Excel.
+    If description is not available, fall back to part number patterns.
     Returns a best-guess component type string or "Unknown".
     """
-    # Combine all available text for analysis
-    text_to_analyze = f"{assy_dpn} {part_number} {description}".upper()
+    # Primary: Use description field from Excel
+    if description:
+        desc_lower = description.lower()
+        if "processor" in desc_lower or "cpu" in desc_lower:
+            return "Processor"
+        elif "memory" in desc_lower or "ram" in desc_lower or "dimm" in desc_lower:
+            return "Memory"
+        elif "network" in desc_lower or "nic" in desc_lower or "ethernet" in desc_lower:
+            return "Network Adapter"
+        elif "drive" in desc_lower or "disk" in desc_lower or "storage" in desc_lower:
+            return "Storage Drive"
+        elif "power" in desc_lower or "supply" in desc_lower:
+            return "Power Supply"
+        elif "fan" in desc_lower:
+            return "Fan"
+        elif "controller" in desc_lower or "raid" in desc_lower or "perc" in desc_lower:
+            return "Storage Controller"
+        elif "motherboard" in desc_lower or "system board" in desc_lower or "chassis" in desc_lower:
+            return "System Board"
+        # If description exists but doesn't match known patterns, use it as-is
+        return description.strip()
+
+    # Fallback: Try to infer from part number patterns
+    text_to_analyze = f"{assy_dpn} {part_number}".upper()
 
     # Common Dell part number prefixes/patterns
     patterns = {
@@ -1159,22 +1182,6 @@ def _infer_component_type_from_pn(assy_dpn, part_number, description):
         for keyword in keywords:
             if keyword in text_to_analyze:
                 return comp_type
-
-    # If no pattern match, try to infer from description
-    if description:
-        desc_lower = description.lower()
-        if "processor" in desc_lower or "cpu" in desc_lower:
-            return "Processor"
-        elif "memory" in desc_lower or "ram" in desc_lower or "dimm" in desc_lower:
-            return "Memory"
-        elif "network" in desc_lower or "nic" in desc_lower or "ethernet" in desc_lower:
-            return "Network Adapter"
-        elif "drive" in desc_lower or "disk" in desc_lower or "storage" in desc_lower:
-            return "Storage Drive"
-        elif "power" in desc_lower or "supply" in desc_lower:
-            return "Power Supply"
-        elif "fan" in desc_lower:
-            return "Fan"
 
     return "Unknown"
 
