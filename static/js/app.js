@@ -456,6 +456,7 @@
     // ==================================================================
 
     const bomFile          = document.getElementById("bom-file");
+    const bomFileInput     = bomFile;  // Alias for consistency
     const bomFileName      = document.getElementById("bom-file-name");
     const btnCompare       = document.getElementById("btn-compare");
     const btnCompareSingle = document.getElementById("btn-compare-single");
@@ -463,6 +464,7 @@
     const sheetSelectionRow = document.getElementById("sheet-selection-row");
     const compareButtonRow = document.getElementById("compare-button-row");
     const bomSheetSelect = document.getElementById("bom-sheet-select");
+    const bomFileLabel     = bomFile.parentElement;
     const btnCompareText    = btnCompare.querySelector(".btn-text");
     const btnCompareSpinner = btnCompare.querySelector(".btn-spinner");
     const comparisonSection = document.getElementById("comparison-section");
