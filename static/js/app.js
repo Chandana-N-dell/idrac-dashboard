@@ -30,6 +30,12 @@
     const btnExportCsv     = document.getElementById("btn-export-csv");
     const btnDisconnect    = document.getElementById("btn-disconnect");
     const warningsBox      = document.getElementById("warnings-box");
+    const pageInterfaceComparison = document.getElementById("page-interface-comparison");
+    const btnRunInterfaceComparison = document.getElementById("btn-run-interface-comparison");
+    const interfaceCmpSection = document.getElementById("interface-comparison-section");
+    const interfaceCmpSummary = document.getElementById("interface-cmp-summary");
+    const interfaceCmpBody = document.getElementById("interface-cmp-body");
+    const interfaceCmpError = document.getElementById("interface-comparison-error");
 
     // ── Category → CSS class mapping ─────────────────────────────────
     const CAT_CLASS = {
@@ -796,6 +802,8 @@
             show(pageBom);
         } else if (pageName === "logs") {
             show(pageLogs);
+        } else if (pageName === "interface-comparison") {
+            show(pageInterfaceComparison);
         }
     }
 
@@ -919,6 +927,109 @@
         healthStatusValue.textContent = statusText;
         healthStatusIcon.className = "health-status-icon " + status;
         healthStatusValue.className = "health-status-value " + status;
+    }
+
+    // ── Interface Comparison Functionality ──────────────────────────────────
+    btnRunInterfaceComparison.addEventListener("click", async () => {
+        hide(interfaceCmpError);
+        const btnText = btnRunInterfaceComparison.querySelector(".btn-text");
+        const btnSpinner = btnRunInterfaceComparison.querySelector(".btn-spinner");
+
+        btnRunInterfaceComparison.disabled = true;
+        hide(btnText);
+        show(btnSpinner);
+
+        try {
+            const resp = await fetch("/api/inventory-comparison", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    host: document.getElementById("host").value.trim(),
+                    username: document.getElementById("username").value.trim(),
+                    password: document.getElementById("password").value,
+                }),
+            });
+
+            const data = await resp.json();
+
+            if (!resp.ok) {
+                throw new Error(data.error || "Comparison failed");
+            }
+
+            renderInterfaceComparison(data);
+        } catch (err) {
+            interfaceCmpError.textContent = err.message;
+            show(interfaceCmpError);
+        } finally {
+            btnRunInterfaceComparison.disabled = false;
+            show(btnText);
+            hide(btnSpinner);
+        }
+    });
+
+    function renderInterfaceComparison(data) {
+        show(interfaceCmpSection);
+
+        const summary = data.summary || {};
+        interfaceCmpSummary.innerHTML = `
+            <div class="summary-item">
+                <span class="summary-label">Redfish:</span>
+                <span class="summary-value">${summary.redfish_count || 0}</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">racadm:</span>
+                <span class="summary-value">${summary.racadm_count || 0}</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">IPMI:</span>
+                <span class="summary-value">${summary.ipmi_count || 0}</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">Total Compared:</span>
+                <span class="summary-value">${summary.total_compared || 0}</span>
+            </div>
+        `;
+
+        const comparison = data.comparison || {};
+        const results = Object.values(comparison);
+
+        if (results.length === 0) {
+            interfaceCmpBody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted);">No comparison results available.</td></tr>';
+            return;
+        }
+
+        interfaceCmpBody.innerHTML = results.map(item => {
+            const statusClass = getStatusClass(item.status);
+            const redfishInfo = item.redfish ? `${item.redfish.device_description || 'N/A'}` : 'N/A';
+            const racadmInfo = item.racadm ? `${item.racadm.device_description || 'N/A'}` : 'N/A';
+            const ipmiInfo = item.ipmi ? `${item.ipmi.device_description || 'N/A'}` : 'N/A';
+
+            return `
+            <tr>
+                <td>${esc(item.component_type)}</td>
+                <td>${esc(item.part_number)}</td>
+                <td>${esc(redfishInfo)}</td>
+                <td>${esc(racadmInfo)}</td>
+                <td>${esc(ipmiInfo)}</td>
+                <td><span class="status-badge ${statusClass}">${esc(item.status)}</span></td>
+            </tr>
+        `;
+        }).join("");
+    }
+
+    function getStatusClass(status) {
+        switch(status) {
+            case "match":
+                return "status-ok";
+            case "missing_redfish":
+            case "missing_racadm":
+            case "missing_ipmi":
+                return "status-warning";
+            case "description_mismatch":
+                return "status-error";
+            default:
+                return "status-na";
+        }
     }
 
     // ── Fan Details Functionality ──────────────────────────────────────────

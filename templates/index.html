@@ -54,6 +54,11 @@
                         <polyline points="10 9 9 9 8 9"/>
                     </svg>
                 </a>
+                <a href="#" class="nav-item" data-page="interface-comparison" title="Interface Comparison">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-.46 5.25C7.56 11.53 10.86 12.74 14 13.09a3.37 3.37 0 00-.94 2.61V22"/>
+                    </svg>
+                </a>
             </nav>
         </aside>
 
@@ -331,6 +336,71 @@
                     </div>
                 </div>
             </div> <!-- End page-logs -->
+
+            <!-- Page 3: Inventory Interface Comparison -->
+            <div id="page-interface-comparison" class="page-section hidden">
+                <div class="bom-section">
+                    <div class="bom-header">
+                        <h3 class="section-title">Interface Comparison</h3>
+                        <button id="btn-run-interface-comparison" class="btn btn-accent btn-sm">
+                            <span class="btn-text">Run Comparison</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Comparing&hellip;
+                            </span>
+                        </button>
+                    </div>
+                    <p class="subtitle">Compare hardware inventory across Redfish, racadm hwinventory, and IPMI FRU interfaces.</p>
+                    <div id="interface-comparison-error" class="error-box hidden"></div>
+                </div>
+
+                <!-- Interface Comparison Results -->
+                <section id="interface-comparison-section" class="hidden">
+                    <!-- Summary Counters -->
+                    <div class="cmp-summary" id="interface-cmp-summary"></div>
+
+                    <!-- Comparison Toolbar -->
+                    <div class="toolbar">
+                        <div class="toolbar-left">
+                            <input type="text" id="interface-cmp-search" class="search-input" placeholder="Search results&hellip;">
+                            <select id="interface-cmp-filter-status" class="filter-select">
+                                <option value="">All Statuses</option>
+                                <option value="match">Match</option>
+                                <option value="missing_redfish">Missing Redfish</option>
+                                <option value="missing_racadm">Missing racadm</option>
+                                <option value="missing_ipmi">Missing IPMI</option>
+                                <option value="description_mismatch">Description Mismatch</option>
+                            </select>
+                        </div>
+                        <div class="toolbar-right">
+                            <button id="btn-interface-cmp-csv" class="btn btn-outline btn-sm">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                    <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                                </svg>
+                                CSV
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Comparison Table -->
+                    <div id="interface-cmp-table-container" class="table-container">
+                        <table id="interface-cmp-table">
+                            <thead>
+                                <tr>
+                                    <th>Component Type</th>
+                                    <th>Part Number</th>
+                                    <th>Redfish</th>
+                                    <th>racadm</th>
+                                    <th>IPMI</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="interface-cmp-body"></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div> <!-- End page-interface-comparison -->
 
         </section>
     </main>

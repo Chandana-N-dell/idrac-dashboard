@@ -522,6 +522,288 @@ def _parse_thermal(base_url, auth, system_model=""):
     return rows
 
 
+def _parse_racadm_hwinventory(host, username, password):
+    """Fetch hardware inventory via racadm hwinventory command."""
+    import subprocess
+    rows = []
+
+    try:
+        # Run racadm hwinventory command
+        # Note: This requires racadm to be installed and configured on the system
+        # Or SSH access to iDRAC to run racadm commands
+        cmd = [
+            "racadm", "-r", host,
+            "-u", username,
+            "-p", password,
+            "hwinventory"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            return rows
+
+        # Parse racadm hwinventory output
+        # The output format varies by iDRAC version, but typically has sections
+        current_section = None
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+
+            # Detect section headers
+            if line.startswith('[') and line.endswith(']'):
+                current_section = line[1:-1]
+                continue
+
+            # Parse key-value pairs
+            if '=' in line and current_section:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+
+                # Normalize component type based on section
+                component_type = _normalize_component_type(current_section)
+
+                rows.append({
+                    "component_type": component_type,
+                    "device_description": key,
+                    "part_number": value,
+                    "serial_number": "",
+                    "source_interface": "racadm"
+                })
+
+    except subprocess.TimeoutExpired:
+        return rows
+    except FileNotFoundError:
+        # racadm not found - this is expected if not installed locally
+        return rows
+    except Exception as e:
+        return rows
+
+    return rows
+
+
+def _parse_ipmi_fru(host, username, password):
+    """Fetch FRU data via IPMI."""
+    import subprocess
+    rows = []
+
+    try:
+        # Run ipmitool fru command
+        # Note: This requires ipmitool to be installed
+        # And IPMI access to be configured on the server
+        cmd = [
+            "ipmitool", "-H", host,
+            "-U", username,
+            "-P", password,
+            "fru"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            return rows
+
+        # Parse IPMI FRU output
+        current_device = None
+        fru_data = {}
+
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+
+            # Detect device headers
+            if line.startswith('FRU Device Description'):
+                # Save previous device if exists
+                if current_device and fru_data:
+                    rows.append({
+                        "component_type": _normalize_component_type(current_device),
+                        "device_description": fru_data.get('Product Name', current_device),
+                        "part_number": fru_data.get('Board Part Number', fru_data.get('Product Part Number', '')),
+                        "serial_number": fru_data.get('Board Serial', fru_data.get('Product Serial', '')),
+                        "source_interface": "ipmi"
+                    })
+                # Start new device
+                current_device = line.split(':', 1)[1].strip() if ':' in line else line
+                fru_data = {}
+                continue
+
+            # Parse FRU fields
+            if ':' in line and current_device:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                fru_data[key] = value
+
+        # Don't forget the last device
+        if current_device and fru_data:
+            rows.append({
+                "component_type": _normalize_component_type(current_device),
+                "device_description": fru_data.get('Product Name', current_device),
+                "part_number": fru_data.get('Board Part Number', fru_data.get('Product Part Number', '')),
+                "serial_number": fru_data.get('Board Serial', fru_data.get('Product Serial', '')),
+                "source_interface": "ipmi"
+            })
+
+    except subprocess.TimeoutExpired:
+        return rows
+    except FileNotFoundError:
+        # ipmitool not found - this is expected if not installed
+        return rows
+    except Exception as e:
+        return rows
+
+    return rows
+
+
+def _normalize_component_type(raw_type):
+    """Normalize component type across interfaces."""
+    if not raw_type:
+        return "Unknown"
+
+    type_map = {
+        # CPU variations
+        "CPU": "Processor",
+        "Processor": "Processor",
+        "PROC": "Processor",
+
+        # Memory variations
+        "DIMM": "Memory",
+        "Memory": "Memory",
+        "RAM": "Memory",
+        "DRAM": "Memory",
+
+        # Network variations
+        "NIC": "Network Adapter",
+        "Network Adapter": "Network Adapter",
+        "Ethernet": "Network Adapter",
+        "Network": "Network Adapter",
+
+        # Storage variations
+        "Disk": "Storage Drive",
+        "Storage Drive": "Storage Drive",
+        "HDD": "Storage Drive",
+        "SSD": "Storage Drive",
+        "NVMe": "Storage Drive",
+
+        # Power variations
+        "PSU": "Power Supply",
+        "Power Supply": "Power Supply",
+        "Power": "Power Supply",
+
+        # Fan variations
+        "Fan": "Fan",
+        "Cooling Fan": "Fan",
+
+        # System board variations
+        "System Board": "System Board",
+        "Motherboard": "System Board",
+        "Main Board": "System Board",
+    }
+
+    # Case-insensitive lookup
+    upper_type = raw_type.upper()
+    for key, value in type_map.items():
+        if key.upper() in upper_type or upper_type in key.upper():
+            return value
+
+    # Return original if no match
+    return raw_type
+
+
+def _normalize_inventory_data(raw_data, source):
+    """Normalize inventory data to standard format."""
+    normalized = []
+
+    for item in raw_data:
+        normalized.append({
+            "component_type": _normalize_component_type(item.get("category", item.get("component_type", ""))),
+            "device_description": item.get("name", item.get("device_description", "")),
+            "part_number": item.get("part_number", ""),
+            "serial_number": item.get("serial", item.get("serial_number", "")),
+            "source_interface": source
+        })
+
+    return normalized
+
+
+def _compare_inventory_across_interfaces(redfish_data, racadm_data, ipmi_data):
+    """Compare inventory data across all three interfaces."""
+    comparison_results = {}
+
+    # Create a map of component_type -> part_number -> list of sources
+    component_map = {}
+
+    # Add Redfish data
+    for item in redfish_data:
+        key = (item["component_type"], item["part_number"])
+        if key not in component_map:
+            component_map[key] = {"redfish": None, "racadm": None, "ipmi": None}
+        component_map[key]["redfish"] = item
+
+    # Add racadm data
+    for item in racadm_data:
+        key = (item["component_type"], item["part_number"])
+        if key not in component_map:
+            component_map[key] = {"redfish": None, "racadm": None, "ipmi": None}
+        component_map[key]["racadm"] = item
+
+    # Add IPMI data
+    for item in ipmi_data:
+        key = (item["component_type"], item["part_number"])
+        if key not in component_map:
+            component_map[key] = {"redfish": None, "racadm": None, "ipmi": None}
+        component_map[key]["ipmi"] = item
+
+    # Generate comparison results
+    for key, sources in component_map.items():
+        component_type, part_number = key
+
+        # Determine status
+        has_redfish = sources["redfish"] is not None
+        has_racadm = sources["racadm"] is not None
+        has_ipmi = sources["ipmi"] is not None
+
+        if has_redfish and has_racadm and has_ipmi:
+            status = "match"
+            # Check for mismatches in descriptions
+            if (sources["redfish"]["device_description"] != sources["racadm"].get("device_description") or
+                sources["redfish"]["device_description"] != sources["ipmi"].get("device_description")):
+                status = "description_mismatch"
+        elif has_redfish and has_racadm:
+            status = "missing_ipmi"
+        elif has_redfish and has_ipmi:
+            status = "missing_racadm"
+        elif has_racadm and has_ipmi:
+            status = "missing_redfish"
+        elif has_redfish:
+            status = "redfish_only"
+        elif has_racadm:
+            status = "racadm_only"
+        elif has_ipmi:
+            status = "ipmi_only"
+        else:
+            status = "unknown"
+
+        comparison_results[f"{component_type}_{part_number}"] = {
+            "component_type": component_type,
+            "part_number": part_number,
+            "redfish": {
+                "device_description": sources["redfish"]["device_description"] if sources["redfish"] else None,
+                "serial_number": sources["redfish"]["serial_number"] if sources["redfish"] else None
+            } if sources["redfish"] else None,
+            "racadm": {
+                "device_description": sources["racadm"]["device_description"] if sources["racadm"] else None,
+                "serial_number": sources["racadm"]["serial_number"] if sources["racadm"] else None
+            } if sources["racadm"] else None,
+            "ipmi": {
+                "device_description": sources["ipmi"]["device_description"] if sources["ipmi"] else None,
+                "serial_number": sources["ipmi"]["serial_number"] if sources["ipmi"] else None
+            } if sources["ipmi"] else None,
+            "status": status
+        }
+
+    return comparison_results
+
+
 def _parse_gpu_pcie(base_url, auth, known_gpu_serials=None):
     """
     Fetch PCIe devices – filter for GPUs/accelerators + list others.
@@ -1394,6 +1676,53 @@ def fetch_health_metrics():
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch health metrics: {str(e)}"}), 500
+
+
+@app.route("/api/inventory-comparison", methods=["POST"])
+def compare_inventory_interfaces():
+    """Compare inventory data across Redfish, racadm, and IPMI interfaces."""
+    try:
+        data = request.get_json()
+        host = data.get("host")
+        username = data.get("username")
+        password = data.get("password")
+
+        if not all([host, username, password]):
+            return jsonify({"error": "Missing credentials"}), 400
+
+        # Fetch Redfish inventory (existing functionality)
+        inventory_result, status, message = fetch_inventory(host, username, password)
+        if status != "ok":
+            return jsonify({"error": f"Failed to fetch Redfish inventory: {message}"}), 400
+
+        redfish_inventory = inventory_result.get("inventory", [])
+        normalized_redfish = _normalize_inventory_data(redfish_inventory, "redfish")
+
+        # Fetch racadm hwinventory
+        racadm_inventory = _parse_racadm_hwinventory(host, username, password)
+
+        # Fetch IPMI FRU
+        ipmi_inventory = _parse_ipmi_fru(host, username, password)
+
+        # Compare across all three interfaces
+        comparison_results = _compare_inventory_across_interfaces(
+            normalized_redfish,
+            racadm_inventory,
+            ipmi_inventory
+        )
+
+        return jsonify({
+            "comparison": comparison_results,
+            "summary": {
+                "redfish_count": len(normalized_redfish),
+                "racadm_count": len(racadm_inventory),
+                "ipmi_count": len(ipmi_inventory),
+                "total_compared": len(comparison_results)
+            }
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to compare inventory: {str(e)}"}), 500
 
 
 @app.route("/api/fans", methods=["POST"])
