@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iDRAC Hardware Inventory Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- ================================================================== -->
+    <!-- Header                                                             -->
+    <!-- ================================================================== -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>
+                    <line x1="12" y1="17" x2="12" y2="21"/>
+                </svg>
+                <span>iDRAC Inventory</span>
+            </div>
+            <div id="connection-badge" class="badge badge-idle">Not Connected</div>
+        </div>
+    </header>
+
+    <div class="layout-wrapper">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-page="inventory" title="System Info">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2"/>
+                        <line x1="8" y1="21" x2="16" y2="21"/>
+                        <line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                </a>
+                <a href="#" class="nav-item" data-page="bom" title="BOM Compare">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                        <polyline points="10 9 9 9 8 9"/>
+                    </svg>
+                </a>
+                <a href="#" class="nav-item" data-page="logs" title="LC Logs">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                        <polyline points="10 9 9 9 8 9"/>
+                    </svg>
+                </a>
+            </nav>
+        </aside>
+
+        <main class="container">
+        <!-- ============================================================== -->
+        <!-- Login Card                                                     -->
+        <!-- ============================================================== -->
+        <section id="login-section" class="card login-card">
+            <h2>Connect to iDRAC</h2>
+            <p class="subtitle">Enter the Redfish credentials for your Dell server.</p>
+
+            <form id="login-form" autocomplete="off">
+                <div class="form-group">
+                    <label for="host">iDRAC IP Address</label>
+                    <input type="text" id="host" placeholder="e.g. 192.168.1.100" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" placeholder="root" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" placeholder="••••••••" required>
+                </div>
+
+                <div id="login-error" class="error-box hidden"></div>
+
+                <button type="submit" id="btn-connect" class="btn btn-primary">
+                    <span class="btn-text">Fetch Inventory</span>
+                    <span class="btn-spinner hidden">
+                        <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                        Connecting&hellip;
+                    </span>
+                </button>
+            </form>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Loading Overlay                                                -->
+        <!-- ============================================================== -->
+        <section id="loading-section" class="card loading-card hidden">
+            <div class="loading-content">
+                <svg class="spinner-large" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20"/></svg>
+                <h3>Fetching Hardware Inventory&hellip;</h3>
+                <p class="subtitle" id="loading-status">Connecting to iDRAC and querying Redfish endpoints</p>
+            </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Dashboard (shown after successful fetch)                       -->
+        <!-- ============================================================== -->
+        <section id="dashboard-section" class="hidden">
+
+            <!-- Page 1: System Information & Inventory -->
+            <div id="page-inventory" class="page-section">
+                <!-- Top Row: System Info + Fan Details + Health Status -->
+                <div class="top-row">
+                    <!-- System Info Table -->
+                    <div class="system-info-wrapper">
+                        <h3 class="section-title">System Information</h3>
+                        <table class="system-info-table" id="system-info-table">
+                            <tbody id="summary-body"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Fan Details Table -->
+                    <div class="fan-details-wrapper">
+                        <h3 class="section-title">Fan Details <span id="fan-tier-badge" class="fan-tier-badge"></span></h3>
+                        <table class="system-info-table" id="fan-info-table">
+                            <thead>
+                                <tr>
+                                    <th>Fan</th>
+                                    <th>Speed (RPM)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fan-body"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Health Status Card -->
+                    <div class="health-status-card">
+                        <h3 class="section-title">System Health</h3>
+                        <div id="health-status-display" class="health-status-display">
+                            <div class="health-status-icon" id="health-status-icon">
+                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                                </svg>
+                            </div>
+                            <div class="health-status-text">
+                                <div class="health-status-label">Status</div>
+                                <div class="health-status-value" id="health-status-value">Connecting...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Toolbar -->
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <input type="text" id="search-input" class="search-input" placeholder="Search inventory&hellip;">
+                        <select id="filter-category" class="filter-select">
+                            <option value="">All Categories</option>
+                        </select>
+                    </div>
+                    <div class="toolbar-right">
+                        <button id="btn-toggle-group" class="btn btn-outline btn-sm" title="Toggle grouping">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/>
+                                <line x1="4" y1="18" x2="8" y2="18"/>
+                            </svg>
+                            Group
+                        </button>
+                        <button id="btn-export-csv" class="btn btn-outline btn-sm" title="Export as CSV">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            CSV
+                        </button>
+                        <button id="btn-disconnect" class="btn btn-danger btn-sm">Disconnect</button>
+                    </div>
+                </div>
+
+            <!-- Inventory Table (flat mode) -->
+            <div id="table-container" class="table-container">
+                <table id="inventory-table">
+                    <thead>
+                        <tr>
+                            <th data-col="category" class="sortable">Category <span class="sort-arrow"></span></th>
+                            <th data-col="type" class="sortable">Type <span class="sort-arrow"></span></th>
+                            <th data-col="name" class="sortable">Name / Model <span class="sort-arrow"></span></th>
+                            <th data-col="slot" class="sortable">Slot / Location <span class="sort-arrow"></span></th>
+                            <th data-col="quantity" class="sortable">Qty <span class="sort-arrow"></span></th>
+                            <th data-col="serial" class="sortable">Serial Number <span class="sort-arrow"></span></th>
+                            <th data-col="part_number" class="sortable">Part Number <span class="sort-arrow"></span></th>
+                            <th data-col="firmware" class="sortable">Firmware <span class="sort-arrow"></span></th>
+                            <th data-col="status" class="sortable">Status <span class="sort-arrow"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="inventory-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Grouped View -->
+            <div id="grouped-container" class="grouped-container hidden"></div>
+
+            <!-- Warnings -->
+            <div id="warnings-box" class="warnings-box hidden"></div>
+            </div> <!-- End page-inventory -->
+
+            <!-- Page 2: BOM Comparison -->
+            <div id="page-bom" class="page-section hidden">
+                <!-- BOM Upload -->
+                <div class="bom-section">
+                    <div class="bom-header">
+                        <h3 class="section-title">BOM Comparison</h3>
+                        <a href="/api/download-template" class="btn btn-outline btn-sm" title="Download sample Excel template">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            Template
+                        </a>
+                    </div>
+                    <p class="subtitle">Upload an Excel (.xlsx) with expected part numbers to compare against live inventory.</p>
+
+                    <div class="bom-upload-row">
+                        <label class="file-label" for="bom-file">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                                <line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
+                            </svg>
+                            <span id="bom-file-name">Choose Excel file&hellip;</span>
+                            <input type="file" id="bom-file" accept=".xlsx,.xls" hidden>
+                        </label>
+                        <button id="btn-compare" class="btn btn-accent btn-sm" disabled>
+                            <span class="btn-text">Compare</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Comparing&hellip;
+                            </span>
+                        </button>
+                    </div>
+                    <div id="bom-error" class="error-box hidden"></div>
+                </div>
+
+            <!-- Comparison Results (hidden until compare runs) -->
+            <section id="comparison-section" class="hidden">
+                <!-- Summary Counters -->
+                <div class="cmp-summary" id="cmp-summary"></div>
+
+                <!-- Comparison Toolbar -->
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <input type="text" id="cmp-search" class="search-input" placeholder="Search results&hellip;">
+                        <select id="cmp-filter-status" class="filter-select">
+                            <option value="">All Statuses</option>
+                            <option value="MATCHED">Matched</option>
+                            <option value="NOT_FOUND">Not Found</option>
+                        </select>
+                    </div>
+                    <div class="toolbar-right">
+                        <button id="btn-cmp-group" class="btn btn-outline btn-sm">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/>
+                                <line x1="4" y1="18" x2="8" y2="18"/>
+                            </svg>
+                            Group
+                        </button>
+                        <button id="btn-cmp-csv" class="btn btn-outline btn-sm">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            CSV
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Flat Table -->
+                <div id="cmp-table-container" class="table-container">
+                    <table id="cmp-table">
+                        <thead>
+                            <tr>
+                                <th data-col="component_type" class="cmp-sortable">Component Type <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="assy_dpn" class="cmp-sortable">ASSY DPN <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="part_number" class="cmp-sortable">Part Number <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="detected_parts" class="cmp-sortable">System Part Number(s) <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="match_status" class="cmp-sortable">Match Status <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="detected_qty" class="cmp-sortable">Detected Qty <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="expected_qty" class="cmp-sortable">Expected Qty <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="qty_status" class="cmp-sortable">Qty Status <span class="cmp-sort-arrow"></span></th>
+                                <th data-col="detail">Detail</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cmp-body"></tbody>
+                    </table>
+                </div>
+
+                <!-- Grouped View -->
+                <div id="cmp-grouped" class="grouped-container hidden"></div>
+            </section>
+            </div> <!-- End page-bom -->
+
+            <!-- Page 3: LC Logs -->
+            <div id="page-logs" class="page-section hidden">
+                <div class="logs-section">
+                    <div class="logs-header">
+                        <h3 class="section-title">LC Logs (Last 50)</h3>
+                        <button id="btn-fetch-logs" class="btn btn-primary btn-sm">
+                            <span class="btn-text">Fetch Logs</span>
+                            <span class="btn-spinner hidden">
+                                <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
+                                Fetching&hellip;
+                            </span>
+                        </button>
+                    </div>
+                    <p class="subtitle">View the last 50 Lifecycle Controller logs from the iDRAC system.</p>
+                    <div id="logs-error" class="error-box hidden"></div>
+
+                    <!-- Logs Table -->
+                    <div id="logs-table-container" class="table-container">
+                        <table id="logs-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Severity</th>
+                                    <th>Message</th>
+                                    <th>Source</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div> <!-- End page-logs -->
+
+        </section>
+    </main>
+    </div>
+
+    <footer class="footer">
+        <span>iDRAC Hardware Inventory Dashboard &mdash; Redfish API v1</span>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
