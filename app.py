@@ -1063,15 +1063,27 @@ def export_csv():
     )
 
 
-# ---------------------------------------------------------------------------
 # BOM / Excel Comparison
 # ---------------------------------------------------------------------------
 
 def _normalize_pn(pn):
-    """Normalize a part number for comparison: strip, uppercase, collapse whitespace."""
-    if not pn or str(pn).strip().upper() in ("N/A", "NONE", ""):
+    """Normalize part number for comparison: strip spaces, uppercase."""
+    if not pn:
         return ""
-    return re.sub(r'\s+', ' ', str(pn).strip().upper())
+    return str(pn).strip().upper()
+
+
+def _normalize_description(desc):
+    """Normalize description for comparison: lowercase, remove extra spaces, remove special chars."""
+    if not desc:
+        return ""
+    # Convert to lowercase
+    desc = str(desc).lower()
+    # Remove extra spaces
+    desc = re.sub(r'\s+', ' ', desc)
+    # Remove common special characters that might differ
+    desc = re.sub(r'[^\w\s\-]', '', desc)
+    return desc
 
 
 def _pn_match_keys(pn_norm):
@@ -1380,6 +1392,7 @@ def compare_inventory(excel_rows, inventory):
       (original, leading-zeros-stripped, dashes-removed, both).
       We do the same for each Excel PN and look for any overlap.
       If either Excel PN matches an inventory row, it's a MATCHED.
+      If no PN match, try to match by description (normalized, case-insensitive).
     """
     # Build lookup: match_key → list of inventory rows
     pn_index = defaultdict(list)
@@ -1388,6 +1401,15 @@ def compare_inventory(excel_rows, inventory):
         if npn:
             for key in _pn_match_keys(npn):
                 pn_index[key].append(inv_row)
+
+    # Build description index: normalized description → list of inventory rows
+    desc_index = defaultdict(list)
+    for inv_row in inventory:
+        desc = inv_row.get("name", "")
+        if desc:
+            norm_desc = _normalize_description(desc)
+            if norm_desc:
+                desc_index[norm_desc].append(inv_row)
 
     results = []
     summary = {"matched": 0, "not_found": 0, "qty_match": 0, "qty_mismatch": 0, "total": len(excel_rows)}
@@ -1429,6 +1451,32 @@ def compare_inventory(excel_rows, inventory):
                     if row_id not in seen_ids:
                         seen_ids.add(row_id)
                         matched_inv.append(row)
+
+        # If no part number match, try to match by description
+        matched_by_desc = False
+        if not matched_inv:
+            ex_desc = ex.get("description", "")
+            if ex_desc:
+                norm_ex_desc = _normalize_description(ex_desc)
+                if norm_ex_desc:
+                    # Try exact match first
+                    for row in desc_index.get(norm_ex_desc, []):
+                        row_id = id(row)
+                        if row_id not in seen_ids:
+                            seen_ids.add(row_id)
+                            matched_inv.append(row)
+                            matched_by_desc = True
+
+                    # If no exact match, try partial match (substring)
+                    if not matched_inv:
+                        for norm_desc, rows in desc_index.items():
+                            if norm_ex_desc in norm_desc or norm_desc in norm_ex_desc:
+                                for row in rows:
+                                    row_id = id(row)
+                                    if row_id not in seen_ids:
+                                        seen_ids.add(row_id)
+                                        matched_inv.append(row)
+                                        matched_by_desc = True
 
         # Optionally filter by component type if provided
         target_cats = _resolve_categories(ex_type) if ex_type else []
@@ -1476,15 +1524,19 @@ def compare_inventory(excel_rows, inventory):
         elif ex_qty is not None and detected_qty != ex_qty:
             qty_status = "QTY_MISMATCH"
             detail = f"Expected {ex_qty}, detected {detected_qty}"
+            if matched_by_desc:
+                detail += " (matched by description)"
             summary["qty_mismatch"] += 1
         elif ex_qty is not None and detected_qty == ex_qty:
             qty_status = "QTY_MATCH"
-            detail = ""
+            detail = "Matched by description" if matched_by_desc else ""
             summary["qty_match"] += 1
         else:
             # No expected qty in Excel – show detected count, mark as match
             qty_status = "QTY_MATCH"
             detail = f"Detected {detected_qty} (no expected qty specified)"
+            if matched_by_desc:
+                detail += " (matched by description)"
             summary["qty_match"] += 1
 
         results.append({
