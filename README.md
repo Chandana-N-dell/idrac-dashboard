@@ -1,6 +1,6 @@
 # iDRAC Hardware Inventory Dashboard
 
-A web-based dashboard that connects to Dell iDRAC via the Redfish API, fetches complete hardware inventory, displays it in a searchable/sortable table, and supports BOM (Bill of Materials) comparison by uploading Excel files.
+A web-based dashboard that connects to Dell iDRAC via the Redfish API, fetches complete hardware inventory, displays it in a searchable/sortable table, supports BOM (Bill of Materials) comparison by uploading Excel files, and includes real-time system health monitoring with fan details.
 
 ## Quick Start
 
@@ -21,6 +21,72 @@ python app.py
 ```
 
 Then open **http://localhost:5000** in your browser.
+
+---
+
+## Team Collaboration & Network Access
+
+### Access from Network IP
+
+The dashboard is configured to run on all network interfaces, allowing team members to access it from their machines.
+
+**Find your network IP:**
+```powershell
+ipconfig
+```
+Look for "IPv4 Address" (e.g., 192.168.1.100)
+
+**Access URLs:**
+- **Local**: `http://localhost:5000`
+- **Network**: `http://YOUR_IP:5000` (e.g., `http://192.168.1.100:5000`)
+
+**Firewall Configuration (if needed):**
+```powershell
+New-NetFirewallRule -DisplayName "iDRAC Dashboard" -Direction Inbound -LocalPort 5000 -Protocol TCP -Action Allow
+```
+
+### Git Setup for Team Collaboration
+
+The project uses Git for version control. Team members can collaborate by:
+
+1. **Clone the repository:**
+```powershell
+git clone <repository-url>
+cd idrac-dashboard
+```
+
+2. **Install dependencies:**
+```powershell
+pip install -r requirements.txt
+pip install beautifulsoup4==4.12.3
+```
+
+3. **Run the server:**
+```powershell
+python app.py
+```
+
+4. **Git workflow for changes:**
+```powershell
+# Pull latest changes
+git pull origin main
+
+# Make changes to code
+
+# Commit changes
+git add .
+git commit -m "Description of changes"
+
+# Push to remote
+git push origin main
+```
+
+**Important Notes:**
+- Server must be running on the host machine for team access
+- Team members must be on the same network
+- Each team member needs their own Python environment
+- iDRAC credentials are entered per session (not stored in code)
+- Changes to code require restarting the server
 
 ---
 
@@ -81,6 +147,24 @@ idrac-dashboard/
 
 ## Features
 
+### System Health Monitoring
+- **Real-time health status**: Displays system health as Healthy, Warning, or Critical
+- **Auto-refresh**: Health status updates every 30 seconds automatically
+- **iDRAC-based**: Uses iDRAC's reported health status for accuracy
+- **Immediate fetch**: Health status fetched immediately after login
+
+### Fan Details
+- **Fan tier classification**: Gold, Silver, or Platinum based on server model
+- **Fan descriptions**: Fetched from iDRAC Hardware Inventory page
+- **Speed monitoring**: Displays fan RPM in real-time
+- **Auto-refresh**: Fan details update every 30 seconds
+- **Tier badge**: Color-coded badge showing overall fan tier
+
+**Fan Tier Classification:**
+- **Platinum**: R750, R760, R7515, R7615, R840, R850, R960, R960XA
+- **Gold**: R640, R650, R6515, R6525, R740, R7415, R7425
+- **Silver**: All other models
+
 ### Hardware Inventory
 - **Full hardware inventory**: System, CPUs, GPUs, Memory, Storage (controllers + drives), NICs, PSUs, Fans, PCIe devices, Firmware
 - **GPU detection**: Identifies GPUs via ProcessorType, keywords, and Video Id; categorized as "Accelerator"
@@ -110,6 +194,8 @@ idrac-dashboard/
 - **Color-coded status badges** -- OK (green), Warning (amber), Critical (red)
 - **Category badges** -- color-coded chips per category
 - **System info table** -- Model, Service Tag, BIOS, Memory, CPU at top-left
+- **Fan details table** -- Fan descriptions, RPM, and tier badge at top-middle
+- **System health card** -- Real-time health status with auto-refresh at top-right
 - **CSV export** -- exports the current filtered view
 - **Dark theme** responsive design
 
@@ -139,6 +225,8 @@ idrac-dashboard/
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/api/inventory` | Fetch inventory from iDRAC (accepts host/username/password) |
+| POST | `/api/health` | Fetch system health metrics (accepts host/username/password) |
+| POST | `/api/fans` | Fetch fan details from iDRAC Hardware Inventory (accepts host/username/password) |
 | POST | `/api/export-csv` | Export inventory as CSV |
 | POST | `/api/compare` | Upload Excel BOM + inventory JSON, returns comparison results |
 | POST | `/api/export-comparison-csv` | Export comparison results as CSV |
