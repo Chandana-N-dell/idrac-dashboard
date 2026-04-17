@@ -720,3 +720,16 @@ a { color: var(--accent); text-decoration: none; }
         flex-direction: column;
     }
 }
+
+/* Fan RPM and Debug Info Styles */
+.fan-rpm {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.debug-info {
+    color: var(--amber);
+    font-style: italic;
+    font-size: 11px;
+    line-height: 1.3;
+}

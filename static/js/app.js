@@ -239,10 +239,26 @@
                 : "";
             const nameWithTier = fanTier ? `${fanTier} ${esc(r.name)}` : esc(r.name);
 
+            // Add fan RPM information for Fan category
+            let fanInfo = "";
+            if (r.category === "Fan" && r.extra) {
+                const rpm = r.extra.ReadingRPM;
+                if (rpm && rpm !== "N/A" && r.type !== "Debug Info") {
+                    fanInfo = `<br><small class="fan-rpm">${rpm} ${r.extra.ReadingUnits || "RPM"}</small>`;
+                }
+                // Show debug info for debug entries
+                if (r.type === "Debug Info" && r.extra.ThermalPath) {
+                    fanInfo = `<br><small class="debug-info">Path: ${r.extra.ThermalPath}</small>`;
+                    if (r.extra.AvailableKeys) {
+                        fanInfo += `<br><small class="debug-info">Keys: ${r.extra.AvailableKeys.join(", ")}</small>`;
+                    }
+                }
+            }
+
             return `<tr>
             <td>${catBadge(r.category)}</td>
             <td>${esc(r.type)}</td>
-            <td>${nameWithTier}</td>
+            <td>${nameWithTier}${fanInfo}</td>
             <td>${esc(r.slot)}</td>
             <td>${esc(String(r.quantity))}</td>
             <td>${esc(r.serial)}</td>
@@ -842,10 +858,28 @@
 
             if (!resp.ok) {
                 const err = await resp.json();
-                throw new Error(err.error || "Failed to fetch logs");
+                let errorMessage = err.error || "Failed to fetch logs";
+                
+                // Add available log services information if provided
+                if (err.available_logs && err.available_logs.length > 0) {
+                    errorMessage += `\n\nAvailable log services: ${err.available_logs.join(", ")}`;
+                }
+                
+                throw new Error(errorMessage);
             }
 
             const data = await resp.json();
+            
+            // Display debug information if available
+            if (data.debug_info) {
+                console.log("LC Logs Debug Info:", data.debug_info);
+                if (data.logs.length === 0) {
+                    logsError.textContent = `No logs found. Endpoint used: ${data.debug_info.endpoint_used}`;
+                    show(logsError);
+                    return;
+                }
+            }
+            
             renderLogs(data.logs);
         } catch (e) {
             logsError.textContent = e.message || "Failed to fetch LC logs. Please try again.";

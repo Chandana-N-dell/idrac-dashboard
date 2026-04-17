@@ -485,9 +485,45 @@ def _parse_power(chassis_data, base_url, auth):
 def _parse_thermal(base_url, auth, system_model=""):
     """Fetch fans from Chassis Thermal endpoint."""
     rows = []
-    thermal = _rf_get(base_url, "/redfish/v1/Chassis/System.Embedded.1/Thermal", auth)
+    
+    # Try multiple thermal endpoint paths
+    thermal_paths = [
+        "/redfish/v1/Chassis/System.Embedded.1/Thermal",
+        "/redfish/v1/Chassis/Chassis.Embedded.1/Thermal",
+        "/redfish/v1/Systems/System.Embedded.1/Thermal"
+    ]
+    
+    thermal = None
+    thermal_path_used = None
+    
+    for path in thermal_paths:
+        try:
+            thermal = _rf_get(base_url, path, auth, timeout=15)
+            if thermal:
+                thermal_path_used = path
+                break
+        except Exception:
+            continue
+    
     if not thermal:
-        return rows
+        # Try to get available chassis to see what's available
+        try:
+            chassis_data = _rf_get(base_url, "/redfish/v1/Chassis", auth, timeout=10)
+            if chassis_data and "Members" in chassis_data:
+                for chassis in chassis_data["Members"]:
+                    chassis_url = chassis["@odata.id"]
+                    chassis_info = _rf_get(base_url, chassis_url, auth, timeout=10)
+                    if chassis_info and "Thermal" in chassis_info:
+                        thermal_url = chassis_info["Thermal"]["@odata.id"]
+                        thermal = _rf_get(base_url, thermal_url, auth, timeout=15)
+                        if thermal:
+                            thermal_path_used = thermal_url
+                            break
+        except Exception:
+            pass
+        
+        if not thermal:
+            return rows
 
     # Determine fan tier based on system model
     fan_tier = "Silver"  # Default tier
@@ -500,25 +536,85 @@ def _parse_thermal(base_url, auth, system_model=""):
         else:
             fan_tier = "Silver"
 
-    for fan in thermal.get("Fans", []):
+    fans = thermal.get("Fans", [])
+    
+    # If no fans found in the primary Fans array, try alternative structures
+    if not fans:
+        # Some iDRAC versions use different structures
+        if "Temperatures" in thermal:
+            # Look for fan data in temperature readings (some systems mix them)
+            temp_readings = thermal.get("Temperatures", [])
+            for reading in temp_readings:
+                if "fan" in str(reading.get("Name", "")).lower() or "fan" in str(reading.get("PhysicalContext", "")).lower():
+                    fans.append(reading)
+    
+    for fan in fans:
+        # Extract fan status with better fallbacks
+        fan_status = "Unknown"
+        if "Status" in fan:
+            status_obj = fan["Status"]
+            if isinstance(status_obj, dict):
+                fan_status = _safe(status_obj, "Health", default=_safe(status_obj, "State", default="Unknown"))
+            else:
+                fan_status = str(status_obj)
+        elif "State" in fan:
+            fan_status = _safe(fan, "State")
+        elif "Health" in fan:
+            fan_status = _safe(fan, "Health")
+        
+        # Extract fan speed/RPM
+        reading_rpm = _safe(fan, "Reading")
+        if reading_rpm == "N/A" or reading_rpm == "":
+            # Try alternative RPM fields
+            reading_rpm = _safe(fan, "SpeedRPM", default=_safe(fan, "CurrentSpeed", default=_safe(fan, "Speed")))
+        
+        # Extract fan name with better fallbacks
+        fan_name = _safe(fan, "Name", default=_safe(fan, "FanName", default=_safe(fan, "MemberId")))
+        if not fan_name or fan_name == "N/A":
+            fan_name = f"Fan {_safe(fan, 'MemberId', default='Unknown')}"
+        
         rows.append({
             "category":    "Fan",
             "type":        "Cooling Fan",
-            "name":        _safe(fan, "Name", default=_safe(fan, "FanName")),
-            "slot":        _safe(fan, "MemberId", default=_safe(fan, "Name")),
+            "name":        fan_name,
+            "slot":        _safe(fan, "MemberId", default=_safe(fan, "PhysicalContext", default=fan_name)),
             "quantity":    1,
             "serial":      _safe(fan, "SerialNumber"),
             "part_number": _safe(fan, "PartNumber"),
             "firmware":    "N/A",
-            "status":      _safe(fan, "Status", "Health"),
+            "status":      fan_status,
             "extra": {
-                "ReadingRPM":     _safe(fan, "Reading"),
-                "ReadingUnits":   _safe(fan, "ReadingUnits"),
+                "ReadingRPM":     reading_rpm,
+                "ReadingUnits":   _safe(fan, "ReadingUnits", default="RPM"),
                 "PhysicalContext": _safe(fan, "PhysicalContext"),
                 "Description":    _safe(fan, "Description"),
                 "FanTier":        fan_tier,
+                "ThermalPath":    thermal_path_used,
+                "HotPluggable":   _safe(fan, "HotPluggable"),
+                "Redundancy":     _safe(fan, "Redundancy"),
             }
         })
+    
+    # Add debug info if no fans found
+    if not rows:
+        # Add a debug entry to help troubleshoot
+        rows.append({
+            "category":    "Fan",
+            "type":        "Debug Info",
+            "name":        "No Fan Data Found",
+            "slot":        f"Endpoint: {thermal_path_used or 'None'}",
+            "quantity":    0,
+            "serial":      "N/A",
+            "part_number": "N/A",
+            "firmware":    "N/A",
+            "status":      "Warning",
+            "extra": {
+                "AvailableKeys": list(thermal.keys()) if isinstance(thermal, dict) else "Non-dict response",
+                "ThermalPath": thermal_path_used,
+                "FanTier": fan_tier,
+            }
+        })
+    
     return rows
 
 
@@ -1534,38 +1630,103 @@ def fetch_lc_logs():
         auth = (username, password)
         base_url = f"https://{host}"
 
-        # Try to get LC logs from iDRAC
-        # Common LC log endpoint: /redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog
-        lc_log_path = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog"
-        lc_log_data = _rf_get(base_url, lc_log_path, auth, timeout=30)
+        # Try multiple LC log endpoint paths for different iDRAC versions
+        lc_log_paths = [
+            "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LCLog",
+            "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LcLog",
+            "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/LcLog/Entries",
+            "/redfish/v1/Systems/System.Embedded.1/Logs/LcLog",
+            "/redfish/v1/Chassis/System.Embedded.1/Logs/LcLog"
+        ]
+        
+        lc_log_data = None
+        lc_log_path_used = None
+        
+        for path in lc_log_paths:
+            try:
+                lc_log_data = _rf_get(base_url, path, auth, timeout=15)
+                if lc_log_data:
+                    lc_log_path_used = path
+                    break
+            except Exception:
+                continue
 
         if not lc_log_data:
-            # Try alternative path
-            lc_log_path = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/LcLog"
-            lc_log_data = _rf_get(base_url, lc_log_path, auth, timeout=30)
-
-        if not lc_log_data:
-            return jsonify({"error": "Could not fetch LC logs from iDRAC"}), 404
+            # Try to get available log services to show what's available
+            try:
+                managers_data = _rf_get(base_url, "/redfish/v1/Managers", auth, timeout=15)
+                if managers_data and "Members" in managers_data:
+                    for manager in managers_data["Members"]:
+                        manager_url = manager["@odata.id"]
+                        manager_data = _rf_get(base_url, manager_url, auth, timeout=15)
+                        if manager_data and "LogServices" in manager_data:
+                            log_services_url = manager_data["LogServices"]["@odata.id"]
+                            log_services_data = _rf_get(base_url, log_services_url, auth, timeout=15)
+                            if log_services_data and "Members" in log_services_data:
+                                available_logs = [service.get("Name", "Unknown") for service in log_services_data["Members"]]
+                                return jsonify({
+                                    "error": "LC logs not found. Available log services: " + ", ".join(available_logs),
+                                    "available_logs": available_logs
+                                }), 404
+            except Exception:
+                pass
+            
+            return jsonify({"error": "Could not fetch LC logs from iDRAC. Please check iDRAC version and permissions."}), 404
 
         # Extract log entries
         logs = []
-        members = lc_log_data.get("Members", [])
-
-        # Get last 50 logs (or all if less than 50)
-        for member in members[-50:]:
-            log_entry = _rf_get(base_url, member["@odata.id"], auth, timeout=30)
-            if log_entry:
+        
+        # Check if this is a direct log entries collection or a log service
+        if "Members" in lc_log_data:
+            members = lc_log_data.get("Members", [])
+            # Get last 50 logs (or all if less than 50)
+            for member in members[-50:]:
+                try:
+                    if "@odata.id" in member:
+                        log_entry = _rf_get(base_url, member["@odata.id"], auth, timeout=15)
+                        if log_entry:
+                            logs.append({
+                                "created": log_entry.get("Created", log_entry.get("Date", "N/A")),
+                                "severity": log_entry.get("Severity", log_entry.get("EntryType", "INFO")),
+                                "message": log_entry.get("Message", log_entry.get("Description", "N/A")),
+                                "source": log_entry.get("Source", log_entry.get("OriginOfCondition", "N/A"))
+                            })
+                except Exception as e:
+                    # Skip individual log entries that fail but continue processing others
+                    continue
+        elif "Entries" in lc_log_data:
+            # Direct log entries collection
+            entries = lc_log_data.get("Entries", [])
+            for entry in entries[-50:]:
                 logs.append({
-                    "created": log_entry.get("Created", "N/A"),
-                    "severity": log_entry.get("Severity", "N/A"),
-                    "message": log_entry.get("Message", "N/A"),
-                    "source": log_entry.get("Source", "N/A")
+                    "created": entry.get("Created", entry.get("Date", "N/A")),
+                    "severity": entry.get("Severity", entry.get("EntryType", "INFO")),
+                    "message": entry.get("Message", entry.get("Description", "N/A")),
+                    "source": entry.get("Source", entry.get("OriginOfCondition", "N/A"))
                 })
+        else:
+            # Try to extract logs directly if no Members or Entries
+            if isinstance(lc_log_data, list):
+                for log_item in lc_log_data[-50:]:
+                    logs.append({
+                        "created": log_item.get("Created", log_item.get("Date", "N/A")),
+                        "severity": log_item.get("Severity", log_item.get("EntryType", "INFO")),
+                        "message": log_item.get("Message", log_item.get("Description", "N/A")),
+                        "source": log_item.get("Source", log_item.get("OriginOfCondition", "N/A"))
+                    })
 
         # Reverse to show newest first
         logs.reverse()
 
-        return jsonify({"logs": logs})
+        # Add debug information
+        return jsonify({
+            "logs": logs,
+            "debug_info": {
+                "endpoint_used": lc_log_path_used,
+                "total_logs_found": len(logs),
+                "response_structure": list(lc_log_data.keys()) if isinstance(lc_log_data, dict) else "non-dict"
+            }
+        })
 
     except Exception as e:
         return jsonify({"error": f"Failed to fetch LC logs: {str(e)}"}), 500
